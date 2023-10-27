@@ -1,0 +1,179 @@
+---
+title: "Myeloma2_SM"
+author: "SNF"
+date: "10/07/20"
+output:
+  prettydoc::html_pretty:
+    theme: Cayman
+    highlight: github
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r, warning=FALSE, message=FALSE, warning=FALSE, echo=F}
+#devtools::install_github('scfurl/m3addon')
+rm(list=ls())
+knitr::opts_chunk$set(fig.width=8, fig.height=6,
+                      echo=FALSE, warning=FALSE, message=FALSE)
+knitr::opts_chunk$set(dev.args=list(bg="transparent"))
+ROOT_DIR<-"/fh/fast/furlan_s/user/owalt/exhaustion"
+stem<-"mm2"
+DATA_DIR <- file.path(ROOT_DIR,  stem, "data")      # SPECIFY HERE
+RES_DIR  <- file.path(ROOT_DIR,  stem, "res")     # SPECIFY HERE
+RMD_DIR  <- file.path(ROOT_DIR,  stem, "rmd")     # SPECIFY HERE
+CDS_DIR <- file.path(ROOT_DIR,  stem, "cds")
+FIG_DIR <- file.path(ROOT_DIR,  stem, "figs")
+EXT_DIR <- file.path(ROOT_DIR,  stem, "ext_data")
+
+dyn.load('/app/software/ArrayFire/3.8.1/lib64/libaf.so.3')
+library(RcppArrayFire)
+
+suppressPackageStartupMessages({
+  library(monocle3)
+  library(m3addon)
+  library(reticulate)
+  library(openxlsx)  
+  library(dplyr)
+  library(Matrix)
+  library(ggplot2)
+  #library(rhdf5)
+  #library(h5)
+  library(hdf5r)
+  library(xfun)
+  library(pals)
+  library(RColorBrewer)
+  library(ggrepel)
+  #library(knitr)
+  library(stringr)
+  library(Seurat)
+  library(ArchR)
+  library(ggsignif)
+  library(viridis)
+  library(ggpubr)
+  library(ComplexHeatmap)
+  library(scCustomize)
+  library(viewmaster)
+  library(tidyverse)
+  library(msigdbr)
+  library(fgsea)
+  library(scRepertoire)
+})
+
+set.seed(1234)
+
+#Load colors
+h_cols <-rev(brewer.pal(name = "RdYlBu", n = 7))
+
+# Monocle Object
+cdsi <-readRDS(file.path(CDS_DIR, "11232021_cdsi.RDS"))
+
+#Seurat Object
+mm2<- readRDS(file.path(CDS_DIR, "120621_mm2_seurat.rds"))
+
+fish_cols<-c("Gzma+_Tex" ="#16482A","Tgphex" = "#45AC49","Tcm" = "#50191E", "Teff"= "#bc2cdb","Tem" = "#f0821d" ,"Tex_1"= "#3244a8","Tex_cycling"="#2394C4","Tn"="#ffc400","Tpex"="#DC3F32" )
+
+mm2$cluster1<-factor(mm2$cluster1, levels=c("Tn", "Tcm", "Tem", "Tpex", "Teff", "Tex_1", "Tgphex", "Gzma+_Tex", "Tex_cycling"))
+
+sampleID_cols<-c(brewer.oranges(n=3), brewer.blues(n =3), "#d8d9a7")
+
+lcmv_cols<-sfc(20)
+names(lcmv_cols)<-levels(factor(fish.integrated$ClusterNames))
+
+rna_cols <- paletteContinuous(n=8)[c(1:3, 6:8)]
+
+set.seed(1234)
+```
+
+#TIM3/PD1 ANALYSIS
+Fig 2A
+```{r CITE Seq analysis}
+pData(cdsi)$Log_PD1 <- colData(cdsi)$Log_PD1
+
+pData(cdsi)$Log_TIM3 <- colData(cdsi)$Log_TIM3
+
+colData(cdsi)$PD1_pos <- rep(F, length(colnames(cdsi)))
+
+colData(cdsi)$PD1_pos[which(colData(cdsi)$Log_PD1 > 2)] <- T
+
+pData(cdsi)$PD1_pos <- colData(cdsi)$PD1_pos
+
+colData(cdsi)$PD1_pos[which(colData(cdsi)$Log_TIM3 > 2 & colData(cdsi)$PD1_pos == T )] <- "PD1+_TIM3+"
+
+colData(cdsi)$PD1_pos[which(colData(cdsi)$Log_TIM3 < 2 &colData(cdsi)$PD1_pos == T)] <- "PD1+_TIM3-"
+
+colData(cdsi)$PD1_pos[which(colData(cdsi)$PD1_pos == F)] <- "PD1-"
+
+table(colData(cdsi)$PD1_pos)
+
+plot_cells(cdsi, color_cells_by = "PD1_pos", label_cell_groups = F, cell_size = 0.5)+scale_color_manual(values = c("#cfcbce", "#0d778c","#b51f50"))
+```
+
+Fig 2B
+#cytoxic molecules by PD1/TIM3+
+```{r}
+mm2$PD1_pos<-cdsi$PD1_pos
+VlnPlot(mm2, features = c("Ifng","Gzmb", "Prf1"), group.by = "PD1_pos", cols = c("#cfcbce", "#0d778c","#b51f50"))
+VlnPlot(mm2, features = c("Il10"), group.by = "PD1_pos", cols = c("#cfcbce", "#0d778c","#b51f50"))
+```
+
+
+################# ID signatures ####################
+FIG S2A
+#ID Tgphex cluster signature
+```{r DE}
+DimPlot(mm2, group.by = "cluster1")
+
+tex<-mm2[,grep("Tex",mm2$cluster1)]
+
+tex$Tgphex<-"Other"
+tex$Tgphex[grep("Tgphex",tex$cluster1)]<-"Tgphex"
+DimPlot(tex, group.by = "Tgphex")+scale_color_manual(values = c("red", "grey50"))+theme_ArchR()
+
+Tgphex_markers<-FindMarkers(tex, group.by = "Tgphex", ident.1 = "Tgphex", ident.2 = "Other")
+
+#get rid of lnf values
+Tgphex_markers$p_val_adj[Tgphex_markers$p_val_adj == 0]<-1e-300
+
+Tgphex_markers$Tgphex<-T
+Tgphex_markers$Tgphex[Tgphex_markers$avg_log2FC < 0]<-F
+
+Tgphex_markers$neg_log_pval<- -log10(Tgphex_markers$p_val_adj)
+
+Tgphex_markers$gene<-rownames(Tgphex_markers)
+
+pdf(file.path(FIG_DIR, "Tgphex_volcano.pdf"), width = 6, height =4)
+ggplot(Tgphex_markers, aes(x = avg_log2FC, y = neg_log_pval, fill = ifelse(abs(avg_log2FC) > 0.2 & neg_log_pval > 50, Tgphex, "ns")))+geom_vline(xintercept = 0)+geom_hline(yintercept = 50, linetype= "dashed", color = "gray80")+geom_vline(xintercept = 0.2, linetype= "dashed", color = "gray80")+geom_vline(xintercept = -0.2 ,linetype= "dashed", color = "gray80")+geom_point(shape = 21)+geom_text_repel(fill = "white", size =3, aes(label = gene), min.segment.length = 0)+scale_fill_manual(values = c("black", "gray90", "red"))+theme_ArchR()
+
+dev.off()
+
+write.csv(Tgphex_markers, file.path(RES_DIR, "Tgphex_markers.csv"))
+```
+
+```{r DE}
+sub<-mm2[,mm2$TIM3_pos == T]
+sub$Tgphex<-"Other"
+sub$Tgphex[grep("Tgphex",sub$cluster1)]<-"Tgphex"
+
+Tgphex_tim3_markers<-FindMarkers(sub, group.by = "Tgphex", ident.1 = "Tgphex", ident.2 = "Other")
+DimPlot(sub, group.by = "Tgphex",cols=c( "firebrick","gray85"))&NoAxes()
+
+Tgphex_tim3_markers$Tgphex<-T
+Tgphex_tim3_markers$Tgphex[Tgphex_tim3_markers$avg_log2FC < 0]<-F
+
+Tgphex_tim3_markers$neg_log_pval<- -log10(Tgphex_tim3_markers$p_val_adj)
+
+Tgphex_tim3_markers$gene<-rownames(Tgphex_tim3_markers)
+
+pdf(file.path(FIG_DIR, "Tgphex_volcano_tim3_pos.pdf"), width = 4, height =4)
+ggplot(Tgphex_tim3_markers, aes(x = avg_log2FC, y = neg_log_pval, fill = ifelse(abs(avg_log2FC) > 0.2 & neg_log_pval > 50, Tgphex, "ns")))+geom_vline(xintercept = 0)+geom_hline(yintercept = 50, linetype= "dashed", color = "gray80")+geom_vline(xintercept = 0.2, linetype= "dashed", color = "gray80")+geom_vline(xintercept = -0.2 ,linetype= "dashed", color = "gray80")+geom_point(shape = 21)+geom_text_repel(fill = "white", size =3, aes(label = gene), min.segment.length = 0)+scale_fill_manual(values = c("black", "gray90", "red"))+theme_ArchR()
+dev.off()
+
+write.csv(Tgphex_tim3_markers, file.path(RES_DIR, "Tgphex_markers_tim3_pos.csv"))
+```
+
+
+
+
+
+
+

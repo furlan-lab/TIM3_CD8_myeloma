@@ -1,0 +1,375 @@
+---
+title: "Mulitome Exhaustion"
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: console
+---
+
+```{r, warning=FALSE, message=FALSE, warning=FALSE, echo=F}
+graphics.off()
+rm(list=ls())
+knitr::opts_chunk$set(fig.width=8, fig.height=6,dpi=300,
+                      echo=FALSE, warning=FALSE, message=FALSE)
+setwd("/fh/fast/furlan_s/user/owalt/exhaustion/mm4")
+RES_DIR  <- file.path("res")     # SPECIFY HERE
+RMD_DIR  <- file.path("rmd")     # SPECIFY HERE
+FIG_DIR <- file.path("figs")
+
+suppressPackageStartupMessages({
+  library(monocle3)
+  library(m3addon)
+  library(reticulate)
+  library(viridis)
+  library(openxlsx)  
+  library(dplyr)
+  library(Matrix)
+  library(ggplot2)
+  library(xfun)
+  library(pals)
+  library(RColorBrewer)
+  library(Signac)
+  library(Seurat)
+  library(ggplot2)
+  library(future)
+  library(GenomicRanges)
+  library(EnsDb.Mmusculus.v79)
+  library(ComplexHeatmap)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+  library(JASPAR2020)
+  library(TFBSTools)
+  library(patchwork)
+  library(stringr)
+  library(ggrepel)
+  library(ggsignif)
+  library(ggpubr)
+  library(ArchR)
+  library(harmony)
+  library(viridis)
+  library(scCustomize)
+  library(SeuratDisk)
+  library(parallel)
+})
+
+set.seed(1234)
+MO <- readRDS(file.path("MO_111521.rds"))
+mm4 <- loadArchRProject()
+
+use_virtualenv("/Users/owaltner/.virtualenvs/reticulate", required = T)
+py_config()
+cols<- c("#9893DA","#ebeb78","#fa9f42","#810e44","#d94745","#00B0E0","#3e5e8e","#0b6e4f","#b8e3ac")
+h_cols <-rev(brewer.pal(name = "RdYlBu", n = 7))
+
+group_cols<- c("#1E90FF","#FFA500","#708090",  "#DC143C", "#008080")
+names(group_cols)<-levels(factor(mm4$group))
+
+dyn.load('/app/software/ArrayFire/3.8.1/lib64/libaf.so.3')
+library(RcppArrayFire)
+
+Sys.setenv(MODULEPATH="/app/modules/all", MODULEPATH_ROOT="/app/modules/all", MODULESHOME="/app/lmod/lmod")
+source("/app/lmod/lmod/init/R", echo=FALSE, max=Inf)
+module("load", "MACS2/2.2.6-foss-2019b-Python-3.7.4")
+```
+ 
+#make free/controlled/object
+```{bash}
+cd '/Users/owaltner/Fred Hutchinson Cancer Research Center/Myeloma Exhaustion - General/mm4'
+
+pf=MM3_2
+outdir=data/$pf/peaks   
+macs2 callpeak -t data/$pf/outs/atac_fragments.tsv.gz -g 2.7e+09 -f BED --nomodel --extsize 200 --shift -100 -n macs2 --outdir $outdir
+
+pf=MM4_1
+outdir=data/$pf/peaks   
+macs2 callpeak -t data/$pf/outs/atac_fragments.tsv.gz -g 2.7e+09 -f BED --nomodel --extsize 200 --shift -100 -n macs2 --outdir $outdir
+
+pf=MM4_2
+outdir=data/$pf/peaks   
+macs2 callpeak -t data/$pf/outs/atac_fragments.tsv.gz -g 2.7e+09 -f BED --nomodel --extsize 200 --shift -100 -n macs2 --outdir $outdir
+```
+
+```{r Make object}
+samps<-c("MM3_2", "MM4_1", "MM4_2")
+
+#Loops through each sample, in output directory peaks
+macs_peaks<-lapply(samps, function(sample){
+  peaks <- read.table(file = file.path(sample, "peaks/macs2_peaks.narrowPeak"))
+  colnames(peaks)<-c("chr start end name integer_score none fold_enrichment log10pvalue log10qvalue relative_summit_pos") %>% strsplit(" ") %>% unlist()
+  peaks
+})
+
+macs_granges<-lapply(macs_peaks, makeGRangesFromDataFrame)
+macs_cgranges<-do.call(c, macs_granges)
+macs_mo.peaks <- reduce(x = macs_cgranges)
+
+peakwidths <- width(macs_mo.peaks)
+macs_mo.peaks <- macs_mo.peaks[peakwidths  < 10000 & peakwidths > 20]
+macs_mo.peaks <- keepStandardChromosomes(macs_mo.peaks, pruning.mode = "coarse")
+
+#Gets metadata for each sample
+meta<-lapply(samps, function(sample){
+  tab<-read.table(
+  file = file.path(sample, "per_barcode_metrics.csv"),
+  stringsAsFactors = FALSE,
+  sep = ",",
+  header = TRUE,
+  row.names = 1
+  )
+  tab[tab$is_cell!=0, ]
+})
+
+#Builds atac matrix for each sample
+frags<-lapply(1:length(samps), function(i){
+  CreateFragmentObject(
+    path = file.path(samps[i], "atac_fragments.tsv.gz"),
+    cells = meta[[i]]$gex_barcode)
+  })
+
+
+macs_counts <- lapply(1:length(samps), function(i){
+  FeatureMatrix(
+  fragments = frags[[i]], process_n = 5000,
+  features = macs_mo.peaks,
+  cells = rownames(meta[[i]]))
+})
+
+# cellranger_counts<-counts
+counts<-macs_counts
+
+# extract gene annotations from EnsDb
+annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Mmusculus.v79) #Change to human
+
+# change to UCSC style (change to human)
+seqlevelsStyle(annotations) <- 'UCSC'
+genome(annotations) <- "mm10"
+
+##individual atac object
+seus<-lapply(1:length(samps), function(i){
+  ca<-CreateChromatinAssay(counts[[i]], fragments = frags[[i]])
+  seu <- CreateSeuratObject(ca, assay = "ATAC", meta.data = meta[[i]])
+  seu$dataset<-samps[i]
+  seu
+})
+
+
+seus<-lapply(1:length(samps), function(i){
+  raw<-Read10X_h5(file.path( samps[i], "filtered_feature_bc_matrix.h5")) #Reading in RNA
+  seu<-CreateSeuratObject(
+    counts = raw$`Gene Expression`[,colnames(counts[[i]])], assay= "RNA", meta.data = meta[[i]])
+  seu[["ATAC"]]<-CreateChromatinAssay(counts[[i]], fragments = frags[[i]], sep = c(":", "-"), annotation = annotations)
+  seu$dataset<-samps[i]
+  seu
+})
+
+#Merge step
+mo <- merge(
+  x = seus[[1]],
+  y = seus[2:length(seus)],
+  add.cell.ids = samps
+)
+```
+
+```{r Get QC data}
+DefaultAssay(mo) <- "ATAC"
+mo$Frip<-mo$atac_peak_region_fragments/mo$atac_fragments
+mo$log_ATAC<-log10(mo$nCount_ATAC)
+
+# compute TSS enrichment score per cell (Takes long time to run)
+mo<- TSSEnrichment(object = mo, fast = F)
+mo <- NucleosomeSignal(mo)
+
+DefaultAssay(mo) <- "RNA"
+mo[["percent.mt"]] <- PercentageFeatureSet(mo, pattern = "^mt-")
+mo$log_RNA<-log10(mo$nCount_RNA)
+
+#Save objects unfiltered and post-filtered
+#saveRDS(mo, file.path(CDS_DIR, "MO_unfiltered_111521.rds"))
+```
+
+```{r QC VlnPLot}
+#Check seurat tutorials and make sure everything makes sense might need to change parameters
+VlnPlot(mo, features =  c("nCount_RNA"), pt.size = 0, group.by="dataset")
+VlnPlot(mo, features =  c("nCount_ATAC"), pt.size = 0, group.by="dataset")
+VlnPlot(t, features =  c("percent.mt"), pt.size = 0, group.by="dataset", y.max= 50)
+VlnPlot(mo, features =  c("log_RNA"), pt.size = 0, group.by="dataset")
+VlnPlot(mo, features =  c("Frip"), pt.size = 0, group.by="dataset")
+VlnPlot(mo, features =  c("TSS.enrichment"), pt.size = 0, group.by="dataset")
+```
+
+```{r Filter object}
+mo<- subset(
+  x =mo,
+  subset = 
+    percent.mt <= 15 &
+    log_ATAC >= 3 &
+    log_ATAC <= 5 &
+    log_RNA <= 4.5 &
+    log_RNA >= 3 &
+    Frip >= .4)
+
+# DefaultAssay(t)<- "RNA"
+# saveRDS(mo, "MO_unfiltered_101521.rds")
+# saveRDS(t, "MO_filtered_101521.rds")
+
+VlnPlot(mo, features =  c("nCount_RNA", "nCount_ATAC", "percent.mt"), pt.size = 0, ncol = 3, log=T, group.by="dataset")
+```
+
+```{r SCT embedding}
+DefaultAssay(mo) <- "RNA"
+
+mo$batch <- mo$dataset
+
+mo$batch[mo$dataset == "MM3_2"]<- "MM3"
+mo$batch[mo$dataset == "MM4_1"]<- "MM4"
+mo$batch[mo$dataset == "MM4_2"]<- "MM4"
+
+mo <- SCTransform(mo, method = "glmGamPoi", vars.to.regress = c("percent.mt", "batch", "dataset"))
+mo <- RunPCA(mo, features = VariableFeatures(mo))
+DefaultAssay(mo) <- "SCT"
+mo<-RunUMAP(mo, dims = 1:15, verbose = T, reduction.name = "SCT_UMAP", reduction = "pca")
+DimPlot(mo, reduction = "SCT_UMAP", group.by = "dataset")
+mo <- FindNeighbors(mo, dims = 1:15)
+mo <- FindClusters(mo, resolution = 0.02, graph.name = "SCT_snn")
+DimPlot(mo, group.by ="seurat_clusters",reduction = "SCT_UMAP", label = T)&NoAxes()&ggtitle(label= "Clusters")
+mo <- mo[,mo$seurat_clusters == "0"]
+
+mo <- RunPCA(mo, features = VariableFeatures(mo))
+mo<-RunUMAP(mo, dims = 1:15, verbose = T, reduction.name = "SCT_UMAP", reduction = "pca")
+DimPlot(mo, reduction = "SCT_UMAP", group.by = "dataset")
+```
+
+```{r ATAC embedding}
+DefaultAssay(mo) <- "ATAC"
+mo <- FindTopFeatures(mo, min.cutoff = 5)
+mo <- RunTFIDF(mo)
+mo<- RunSVD(mo)
+ElbowPlot(mo, ndims = 50)
+
+#Don't run harmony for now
+mo <- RunHarmony(
+  object = mo,
+  group.by.vars = 'batch',
+  reduction = 'lsi',
+  assay.use = 'ATAC',
+  project.dim = FALSE
+)
+
+mo <- RunUMAP(mo, dims = 2:15, reduction = 'harmony')
+DimPlot(mo, group.by = "dataset", label=T, reduction = "umap")+ggtitle("Harmony integration")
+```
+
+```{r mo WNN}
+#might have to change harmony to lsi
+mo <- FindMultiModalNeighbors(mo, reduction.list = list("pca", "harmony"), dims.list = list(1:15, 2:15), weighted.nn.name = "sct.harmony.nn")
+
+mo<- RunUMAP(mo, nn.name = "sct.harmony.nn", reduction.name = "wnn.umap.harmony", reduction.key = "harmony.wnnUMAP_")
+
+DimPlot(mo, group.by = "dataset", reduction = "wnn.umap.harmony", label = T)+ggtitle("WNN HARMONY UMAP")
+#Try to get to here
+```
+
+```{r Cluster MO}
+mo<- FindClusters(mo, resolution = 0.2, graph.name = "wsnn", method =1, modularity.fxn = 1)
+DimPlot(mo, reduction = "wnn.umap.harmony")
+mo<- mo[,mo$seurat_clusters != "8"]
+
+mo <- FindNeighbors(mo, reduction = "wnn.umap.harmony", dims=1:2, graph.name = "wsnn" )
+mo<- FindClusters(mo, resolution = 0.05, graph.name = "wsnn", method =1, modularity.fxn = 1)
+DimPlot(mo, reduction = "wnn.umap.harmony")
+
+mo<- FindSubCluster(mo, cluster = 2, graph.name = "wsnn", resolution = 0.055, subcluster.name = "sub_2")
+mo<- FindSubCluster(mo, cluster = 1, graph.name = "wsnn", resolution = 0.03, subcluster.name = "sub_1")
+
+mo$sub.cluster <- mo$sub_2
+
+mo$sub.cluster[mo$sub.cluster == "1"]<- mo$sub_1[which( mo$sub_1 == "1_0" | mo$sub_1 == "1_1")]
+
+DimPlot(mo, reduction = "wnn.umap.harmony", group.by = "sub.cluster", cols = cols)+theme_ArchR()
+SCpubr::do_DimPlot(sample = mo, reduction = "wnn.umap.harmony", group.by = "sub.cluster", 
+                         dims = c(2,3))
+# saveRDS(mo, file.path(CDS_DIR, "MO_111521.rds"))
+```
+
+```{r Gene Activity}
+DefaultAssay(mo)<- "ATAC"
+gene.activities <- GeneActivity(mo)
+
+mo[['GENE_ACC']] <- CreateAssayObject(counts = gene.activities)
+mo <- NormalizeData(
+  object = mo,
+  assay = 'GENE_ACC',
+  normalization.method = 'LogNormalize',
+  scale.factor = median(mo$nCount_GENE_ACC)
+)
+DefaultAssay(mo)<- "GENE_ACC"
+mo<-ScaleData(mo)
+
+```
+
+#ID cell types
+```{r SCT Top Markers cluster heatmap}
+DefaultAssay(mo)<- "SCT" 
+
+Idents(mo)<-"sub.cluster"
+mo.markers <- FindAllMarkers(mo, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.2)##finds differentially expressed cluster biomarkers
+write.csv(mo.markers, file.path(RES_DIR, "113021_mo_cluster_markers.csv"))
+
+top_n<- mo.markers %>%
+  dplyr::filter(!str_detect(gene, "^Rpl")) %>%
+  dplyr::filter(!str_detect(gene, "^Rps")) %>%
+  dplyr::filter(!str_detect(gene, "^mt-")) %>%
+  group_by(cluster) %>%
+  slice_max(n = 10, order_by = avg_log2FC)
+
+DoHeatmap(mo, features = top_n$gene, group.by = "sub.cluster", slot = "scale.data")+scale_fill_gradientn(h_cols)
+```
+
+```{r Rename metadata}
+mo$dataset[mo$dataset == "MM3_2"]<-"3_Relapsed"
+mo$dataset[mo$dataset == "MM4_1"]<-"2_Controlled"
+mo$dataset[mo$dataset == "MM4_2"]<-"1_Free"
+mo<-MO
+mo$cell_type <- mo$sub.cluster
+mo$cell_type[mo$cell_type == "2_0"]<-"TEX_1"
+mo$cell_type[mo$cell_type == "1_0"]<-"TEX_2"
+mo$cell_type[mo$cell_type == "1_1"]<-"TEX_3"
+mo$cell_type[mo$cell_type == "0"]<-"Naive"
+mo$cell_type[mo$cell_type == "4"]<-"TEX_Cycling"
+mo$cell_type[mo$cell_type == "2_3"]<-"TEM_Cytotoxic"
+mo$cell_type[mo$cell_type == "2_1"]<-"TEM_Il18r+"
+mo$cell_type[mo$cell_type == "2_2"]<-"TEM"
+mo$cell_type[mo$cell_type == "3"]<-"TCM"
+
+
+pse<- mm4@cellColData$Exhaustion
+names(pse)<- rownames(mm4)
+
+names(pse) <- gsub("MM3_2#", "MM3_2_", names(pse))
+names(pse) <- gsub("MM4_2#", "MM4_2_", names(pse))
+names(pse) <- gsub("MM4_1#", "MM4_1_", names(pse))
+
+mo<-mo[,which(colnames(mo) %in% names(pse))]
+
+mo$pseudotime <- pse
+
+mo$group <- mo$cell_type
+mo$group[mo$group == "TEX_Cycling"]<-"Cycling"
+mo$group[grep("^TEX", mo$group)]<-"TEX"
+
+mo$group[grep("^TEM", mo$group)]<-"TEM"
+
+``` 
+
+#Save Seurat
+```{r}
+# saveRDS(mo, "MO_111521.rds")
+```
+
+#Make ArchR object
+```{bash}
+cd ~
+ml fhR/4.2.0-foss-2021b
+ml MACS2
+sbatch -n 1 -c 30 -p campus-new --mem-per-cpu=21000MB --wrap='Rscript /fh/fast/furlan_s/user/owalt/exhaustion/mm4/rmd/build_ArchR_object.R'
+```

@@ -1,0 +1,432 @@
+---
+title: "Relasped mulitome"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r, warning=FALSE, message=FALSE, warning=FALSE, echo=F}
+graphics.off()
+rm(list=ls())
+knitr::opts_chunk$set(fig.width=8, fig.height=6,dpi=300,
+                      echo=FALSE, warning=FALSE, message=FALSE)
+setwd("/fh/fast/furlan_s/user/owalt/exhaustion/relapse")
+RES_DIR  <- file.path("res")     # SPECIFY HERE
+RMD_DIR  <- file.path("rmd")     # SPECIFY HERE
+FIG_DIR <- file.path("figs")
+
+suppressPackageStartupMessages({
+  library(monocle3)
+  library(m3addon)
+  library(reticulate)
+  library(viridis)
+  library(openxlsx)  
+  library(dplyr)
+  library(Matrix)
+  library(ggplot2)
+  library(xfun)
+  library(pals)
+  library(RColorBrewer)
+  library(Signac)
+  library(Seurat)
+  library(ggplot2)
+  library(future)
+  library(GenomicRanges)
+  library(EnsDb.Mmusculus.v79)
+  library(ComplexHeatmap)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+  #library(JASPAR2020)
+  library(TFBSTools)
+  library(patchwork)
+  library(stringr)
+  library(ggrepel)
+  library(ggsignif)
+  library(ggpubr)
+  library(ArchR)
+  library(harmony)
+  library(viridis)
+  library(scCustomize)
+  library(SeuratDisk)
+  library(BuenColors)
+  library(pbmcapply)
+  library(ggrastr)
+  library(msigdbr)
+  library(FigR)
+  library(parallel)
+})
+
+set.seed(1234)
+mo <- readRDS(file.path( "MO_111521.rds"))
+```
+
+configure python environment
+```{r}
+library(reticulate)
+# /home/owaltner/mypython/bin/python
+
+Sys.setenv(RETICULATE_PYTHON="/home/owaltner/mypython/bin/python")
+use_virtualenv("/home/owaltner/mypython")
+use_python("/home/owaltner/mypython/bin/python")
+py_config()
+
+
+Sys.setenv(PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION="python")
+```
+
+configure R environment
+```{r, warning=FALSE, message=FALSE, warning=FALSE, echo=F}
+dyn.load('/app/software/ArrayFire/3.8.1/lib64/libaf.so.3')
+library(RcppArrayFire)
+library(viewmaster)
+
+Sys.setenv(MODULEPATH="/app/modules/all", MODULEPATH_ROOT="/app/modules/all", MODULESHOME="/app/lmod/lmod")
+source("/app/lmod/lmod/init/R", echo=FALSE, max=Inf)
+module("load", "MACS2/2.2.6-foss-2019b-Python-3.7.4")
+module("load", "GCCcore/11.2.0")
+
+#make cairo functional
+knitr::opts_chunk$set(dev="CairoPNG")
+
+detach("package:ArchR", unload=TRUE)
+library(ArchR)
+
+```
+
+```{r colors}
+rna_cols <- paletteContinuous(n=8)[c(1:3, 6:8)]
+atac_cols <- paletteContinuous(set = "blueYellow")
+
+pal<- rev(mako(n=9))
+pal<-pal[1:8]
+pal<-c("#ffffff", pal)
+chromvar_cols<-pal
+
+adt_cols <- paletteContinuous(set = "whiteBlue")
+pseudotime_cols<- viridis::plasma(n=10)
+tcr_cols <- c("gray90", rev(brewer.spectral(n =5)))
+
+t <-BuenColors::jdb_palette("brewer_spectra")
+multiome_cols <- c(t[2],t[3], "#e5e6e1", t[7],t[9])
+
+# clus_cols<- c("#9893DA","#ebeb78","#fa9f42","#810e44","#d94745","#00B0E0","#32a4a8","#b8e3ac","#3e5e8e","#0b6e4f")
+clus_cols<-viewmaster::pal_discrete(values= levels(factor(seu$cluster)), set = "acidRain", reverse = T)
+h_cols <-rev(brewer.pal(name = "RdYlBu", n = 7))
+rna_cols<-paletteContinuous(n=10)[c(1:4, 7:10)]
+seu$cell_type%>% table()
+seu$cell_type<-factor(seu$cell_type, levels = c("Tn", "Tcm", "Tem", "Tem_2", "Teff", "Tpex", "Tg_phex", "Tex", "Tex_cycling", "Ly6a-_Tex", "Ifng-_Tex"))
+
+cell_type_cols<-c( "Ifng-_Tex" ="#191970","Ly6a-_Tex" = "#006400", "Tex" = "#87CEFA", "Tg_phex" = "#20B2AA","Tcm" = "#696969", "Teff" = "#9370DB", "Tem" = "#FF8C00", "Tem_2" = "#FF4500", "Tex_cycling" = "#1E90FF", "Tn" = "#ebeb78", "Tpex" ="#DC143C" )
+
+cluster_cols<-c("0" = "#20B2AA","1" = "#006400", "8" = "#87CEFA", "10" ="#191970", "5" = "#696969", "2" = "#9370DB", "4" = "#FF8C00", "9" = "#FF4500", "6" = "#1E90FF", "3" = "#ebeb78", "7" ="#DC143C" )
+```
+
+#Make object
+```{r}
+MO <- readRDS(file.path("../mm4/MO_111521.rds"))
+DimPlot(MO, group.by = "dataset", reduction = "wnn.umap.harmony")
+
+rel<-MO[,MO$dataset == "MM3_2"]
+
+rel <- SCTransform(rel, method = "glmGamPoi", vars.to.regress = c("percent.mt"))
+rel <- RunPCA(rel, features = VariableFeatures(rel))
+DefaultAssay(rel) <- "SCT"
+rel<-RunUMAP(rel, dims = 1:15, verbose = T, reduction.name = "SCT_UMAP", reduction = "pca")
+DimPlot(rel, reduction = "SCT_UMAP", group.by = "dataset")
+
+DefaultAssay(rel) <- "ATAC"
+rel <- FindTopFeatures(rel, min.cutoff = 5)
+rel <- RunTFIDF(rel)
+rel<- RunSVD(rel)
+ElbowPlot(rel, ndims = 50)
+```
+
+```{r mo WNN}
+rel <- FindMultiModalNeighbors(rel, reduction.list = list("pca", "lsi"), dims.list = list(1:15, 2:15), weighted.nn.name = "wnn.nn")
+
+rel<- RunUMAP(rel, nn.name = "wnn.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_")
+
+DimPlot(rel, group.by = "dataset", reduction = "wnn.umap", label = T)
+```
+
+```{r find Clusters}
+mo<-FindClusters(mo, graph.name = "wknn", resolution = 0.8)
+
+DimPlot(mo, reduction = "wnn.umap", cols = sfc(12))
+Idents(mo)
+
+DefaultAssay(mo)<-"SCT"
+rownames(mo)[grep("Slam", rownames(mo))]
+FeaturePlot_scCustom(mo, features = "Slamf6", reduction = "wnn.umap")
+FeaturePlot_scCustom(mo, features = "Ly6a", reduction = "wnn.umap")
+FeaturePlot_scCustom(mo, features = "Gzma", reduction = "wnn.umap")
+FeaturePlot_scCustom(mo, features = "Maf", reduction = "wnn.umap")
+FeaturePlot_scCustom(mo, features = "Cd28", reduction = "wnn.umap")
+FeaturePlot_scCustom(mo, features = "Gzmb", reduction = "wnn.umap")
+FeaturePlot_scCustom(mo, features = "Ifng", reduction = "wnn.umap")
+FeaturePlot_scCustom(mo, features = "Batf", reduction = "wnn.umap")
+# mo<-rel
+```
+
+```{r get relapsed cells}
+rel<-subsetArchRProject(mm4, cells = rownames(mm4@cellColData[mm4@cellColData$Sample == "MM3_2",]), outputDirectory = "/fh/fast/furlan_s/user/owalt/exhaustion/relapse", force =T)
+rel@projectMetadata@listData[["outputDirectory"]]<-"/fh/fast/furlan_s/user/owalt/exhaustion/relapse_subset_mo"
+
+rel<-loadArchRProject()
+```
+
+```{r re-embed}
+rel<-filterDoublets(rel)
+rel<- addIterativeLSI(
+    ArchRProj = rel, 
+    clusterParams = list(
+      resolution = 0.1, 
+      sampleCells = 10000,
+      n.start = 10
+    ),
+    saveIterations = FALSE,
+    useMatrix = "GeneExpressionMatrix", 
+    depthCol = "Gex_nUMI",
+    varFeatures = 2000,
+    firstSelection = "variable",
+    binarize = F,
+    name = "LSI_RNA",
+    dimsToUse = 1:30,
+    force = T
+    
+)
+
+rel<- addIterativeLSI(
+    ArchRProj = rel,
+    useMatrix = "TileMatrix", 
+    name = "ATAC_LSI", 
+    iterations = 2, 
+    clusterParams = list( #See Seurat::FindClusters
+        resolution = c(0.1, 0.2, 0.4), 
+        sampleCells = 10000, 
+        n.start = 10
+    ), 
+    varFeatures = 10000, 
+    dimsToUse = 2:50,
+    force =T
+)
+names(rel@cellColData)
+
+rel<- addCombinedDims(rel, reducedDims = c("LSI_RNA", "ATAC_LSI"), name =  "mo")
+rel<- addImputeWeights(rel, reducedDims = "mo")
+rel<- addUMAP(rel, reducedDims = "mo", force = T,  scaleDims = T, nNeighbors = 20, corCutOff = 0.9)
+
+saveArchRProject(rel)
+```
+
+```{r change umap coordinates}
+umap<- data.frame(mo@reductions$wnn.umap@cell.embeddings)
+
+rownames(umap)<- gsub("MM3_2_", "MM3_2#",rownames(umap))
+
+umap<- umap[which(rownames(umap) %in% rownames(rel@cellColData)),]
+
+umap<- umap[order(match(rownames(umap), rownames(rel@cellColData))),]
+
+names(umap)<- names(rel@embeddings@listData$mo_UMAP@listData$df)
+
+rel@embeddings@listData$mo_UMAP@listData$df <- umap
+```
+
+```{r add metadata}
+df<-mo@meta.data
+rownames(df) <- gsub("MM3_2_", "MM3_2#", rownames(df))
+
+rel<-rel[which(rownames(rel@cellColData) %in% rownames(df)),]
+
+meta<- data.frame(rel@cellColData)
+
+df<- df[which(rownames(df) %in% rownames(rel@cellColData)),]
+
+df<- df[order(match(rownames(df), rownames(rel@cellColData))),]
+
+rel$cluster<- df$wknn_res.0.8
+
+rel<- addImputeWeights(rel, reducedDims = "mo")
+plotEmbedding(rel, name = "cluster", embedding = "ATAC_UMAP")
+
+saveArchRProject(rel)
+
+getAvailableMatrices(rel)
+```
+
+#Create Seurat
+```{r}
+t<-viewmaster::archR_to_seurat(rel, matrix = "GeneExpressionMatrix", binarize = F, archr_rd = "mo_UMAP")
+seu<-NormalizeData(t) %>% FindVariableFeatures() %>% ScaleData() %>% RunPCA()
+
+getAvailableMatrices(rel)
+
+peak<-getMatrixFromProject(rel, "PeakMatrix", binarize = F)
+mat<-peak@assays@data$PeakMatrix
+feature_df <- peak@rowRanges %>% as.data.frame()
+rn <- paste0(feature_df[, 1], "-", feature_df[, 2], "-", 
+            feature_df[, 3])
+rownames(mat)<-rn
+# colnames(mat)<-gsub("#", "_", colnames(mat))
+seu[["peaks"]]<-CreateAssayObject(mat %>% as.sparse())
+
+gene_score<-getMatrixFromProject(rel, "GeneScoreMatrix", binarize = F)
+mat<-gene_score@assays@data$GeneScoreMatrix
+rownames(mat)<-gene_score@elementMetadata$name
+
+# colnames(mat)<-gsub("#", "_", colnames(mat))
+seu[["GeneScoreMatrix"]]<-CreateAssayObject(mat)
+
+motif<-getMatrixFromProject(rel, "MotifMatrix", binarize = F)
+mat<-motif@assays@data$z
+
+seu[["Motif"]]<-CreateAssayObject(mat)
+
+saveRDS(seu,file ="/fh/fast/furlan_s/user/owalt/exhaustion/relapse/relapse_seurat.rds" )
+```
+
+#Find all markers
+```{r}
+Idents(seu)<-"cluster"
+markers<-FindAllMarkers(seu)
+write.csv(markers, file.path(RES_DIR, "seurat_clusters_de.csv"))
+```
+
+#label cell type
+```{r}
+rel$cluster<-seu$cluster
+rel$cell_type<-rel$cluster
+rel$cell_type[rel$cluster == "0"]<-"Tg_phex"
+rel$cell_type[rel$cluster == "1"]<-"Ly6a-_Tex"
+rel$cell_type[rel$cluster == "2"]<-"Teff"
+rel$cell_type[rel$cluster == "3"]<-"Tn"
+rel$cell_type[rel$cluster == "4"]<-"Tem"
+rel$cell_type[rel$cluster == "5"]<-"Tcm"
+rel$cell_type[rel$cluster == "6"]<-"Tex_cycling"
+rel$cell_type[rel$cluster == "7"]<-"Tpex"
+rel$cell_type[rel$cluster == "8"]<-"Tex"
+rel$cell_type[rel$cluster == "9"]<-"Tem_2"
+rel$cell_type[rel$cluster == "10"]<-"Ifng-_Tex"
+
+seu$cell_type<-rel$cell_type
+
+seu$cell_type<-factor(seu$cell_type, levels = c("Tn", "Tcm", "Tem", "Tem_2", "Teff", "Tpex", "Tex_cycling", "Tg_phex", "Ly6a-_Tex", "Tex", "Ifng-_Tex"))
+
+saveRDS(seu, "relapse_seurat.rds")
+```
+
+#add peak data
+```{r}
+pathToMacs2 <- findMacs2()
+
+rel<- addGroupCoverages(rel, groupBy = "cluster")
+
+rel<- addReproduciblePeakSet(
+    ArchRProj = rel, 
+    groupBy = "cluster", 
+    pathToMacs2 = pathToMacs2
+)
+
+rel<- addPeakMatrix(rel)
+getAvailableMatrices(rel)
+saveArchRProject(rel)
+```
+
+#Add motif data
+```{r Motif Annotations}
+rel<- addBgdPeaks(rel, force = T)
+rel<- addMotifAnnotations(ArchRProj = rel, motifSet = "cisbp", name = "Motif", force = T)
+saveArchRProject(rel)
+
+rel$cluster<-as.character(rel$cluster)
+
+markersPeaks <- getMarkerFeatures(
+    ArchRProj = rel, 
+    useMatrix = "PeakMatrix", 
+    groupBy = "cluster",
+  testMethod = "wilcoxon"
+)
+
+enrichMotifs <- peakAnnoEnrichment(
+    seMarker = markersPeaks,
+    ArchRProj = rel,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.5"
+  )
+
+mtf_df<-assays(enrichMotifs)$mlog10Padj %>% as.data.frame()
+x<-"10"
+top_mtfs_cluster<-lapply(names(mtf_df), function(x){
+  
+  sub<-mtf_df[,x,drop = F] 
+  names(sub)<-"pval"
+  sub %>% top_n(pval, n =10)%>% rownames()
+  
+})
+
+mtfs<-do.call(c, top_mtfs_cluster) %>% unique()
+
+mtf_mat<-assays(enrichMotifs)$mlog10Padj[mtfs,]
+pheatmap(mtf_mat, color = chromvar_cols)
+
+ht<-ComplexHeatmap::draw(mtf_mat, heatmap_legend_side = "bot", annotation_legend_side = "bot")
+
+pdf(file.path(FIG_DIR, "motif_heatmap.pdf"), width = 10, height = 5)
+ht
+dev.off()
+
+rel<-addDeviationsMatrix(rel, force = T)
+
+getAvailableMatrices(rel)
+```
+
+#co accessibility / links
+```{r}
+rel<- addCoAccessibility(
+    ArchRProj = rel,
+    reducedDims = "mo"
+)
+
+rel<- addPeak2GeneLinks(
+    ArchRProj = rel,
+    reducedDims = "mo",
+    useMatrix = "GeneExpressionMatrix"
+)
+
+p <- plotPeak2GeneHeatmap(ArchRProj = rel, groupBy = "cluster", k = 5,palRNA = paletteContinuous(), palATAC = paletteContinuous(set = "blueYellow"), palGroup =cluster_cols, returnMatrices = T )
+p
+
+link_df<- data.frame(p@listData$Peak2GeneLinks)
+
+names(p@listData$RNA@listData$kmeansId)<- rownames(p@listData[["RNA"]]@listData[["matrix"]])
+
+link_df$kmean <- p@listData$RNA@listData$kmeansId[match(names(p@listData$RNA@listData$kmeansId), rownames(link_df))]
+names(link_df)
+
+write.csv(link_df, file.path("res/relapse_kmean_links.csv"))
+
+link_df<-link_df[!duplicated(link_df$gene),]
+
+pdf(file.path(FIG_DIR, "peak_gene_heatmap_cluter.pdf"), width =8, height = 8)
+p
+dev.off()
+
+saveArchRProject(rel)
+```
+
+```{r}
+link_df<-link_df[!duplicated(link_df$gene),]
+
+k1<- link_df[link_df$kmean == "1",]
+k2<- link_df[link_df$kmean == "2",] 
+k3<- link_df[link_df$kmean == "3",] 
+k4<- link_df[link_df$kmean == "4",] 
+k5<- link_df[link_df$kmean == "5",] 
+
+DefaultAssay(m2_seu)<-"SCT"
+seu<-AddModuleScore(seu, features = list(k1$gene, k2$gene, k3$gene,k4$gene,k5$gen), name = "K")
+Stacked_VlnPlot(seu, features = c("K1", "K2", "K3", "K4", "K5"), group.by = "cell_type", colors_use = cell_type_cols)
+```
+
+

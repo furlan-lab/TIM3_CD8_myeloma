@@ -1,0 +1,918 @@
+---
+title: "Myeloma2_SM"
+author: "SNF"
+date: "10/07/20"
+output:
+  prettydoc::html_pretty:
+    theme: Cayman
+    highlight: github
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r, warning=FALSE, message=FALSE, warning=FALSE, echo=F}
+#devtools::install_github('scfurl/m3addon')
+rm(list=ls())
+knitr::opts_chunk$set(fig.width=8, fig.height=6,
+                      echo=FALSE, warning=FALSE, message=FALSE)
+knitr::opts_chunk$set(dev.args=list(bg="transparent"))
+ROOT_DIR<-"/fh/fast/furlan_s/user/owalt/exhaustion"
+stem<-"mm2"
+DATA_DIR <- file.path(ROOT_DIR,  stem, "data")      # SPECIFY HERE
+RES_DIR  <- file.path(ROOT_DIR,  stem, "res")     # SPECIFY HERE
+RMD_DIR  <- file.path(ROOT_DIR,  stem, "rmd")     # SPECIFY HERE
+CDS_DIR <- file.path(ROOT_DIR,  stem, "cds")
+FIG_DIR <- file.path(ROOT_DIR,  stem, "figs")
+EXT_DIR <- file.path(ROOT_DIR,  stem, "ext_data")
+
+dyn.load('/app/software/ArrayFire/3.8.1/lib64/libaf.so.3')
+library(RcppArrayFire)
+
+suppressPackageStartupMessages({
+  library(monocle3)
+  library(m3addon)
+  library(reticulate)
+  library(openxlsx)  
+  library(dplyr)
+  library(Matrix)
+  library(ggplot2)
+  library(hdf5r)
+  library(xfun)
+  library(pals)
+  library(RColorBrewer)
+  library(ggrepel)
+  library(stringr)
+  library(Seurat)
+  library(ArchR)
+  library(ggsignif)
+  library(viridis)
+  library(ggpubr)
+  library(data.table)
+  library(DESeq2)
+  library(pheatmap)
+  library(ggrepel)
+  library(ComplexHeatmap)
+  library(scCustomize)
+  library(viewmaster)
+  library(tidyverse)
+  library(msigdbr)
+  library(fgsea)
+  library(scRepertoire)
+})
+
+set.seed(1234)
+
+#Load colors
+h_cols <-rev(brewer.pal(name = "RdYlBu", n = 7))
+
+# Monocle Object
+cdsi <-readRDS(file.path(CDS_DIR, "11232021_cdsi.RDS"))
+
+#Seurat Object
+mm2<- readRDS(file.path(CDS_DIR, "120621_mm2_seurat.rds"))
+
+fish.integrated<-readRDS(file.path(EXT_DIR, "fish_integrated.rds"))
+
+fish_cols<-c("Gzma+_Tex" ="#16482A","Tgphex" = "#45AC49","Tcm" = "#50191E", "Teff"= "#bc2cdb","Tem" = "#f0821d" ,"Tex_1"= "#3244a8","Tex_cycling"="#2394C4","Tn"="#ffc400","Tpex"="#DC3F32" )
+
+mm2$cluster1<-factor(mm2$cluster1, levels=c("Tn", "Tcm", "Tem", "Tpex", "Teff", "Tex_1", "Tgphex", "Gzma+_Tex", "Tex_cycling"))
+
+sampleID_cols<-c(brewer.oranges(n=3), brewer.blues(n =3), "#d8d9a7")
+
+lcmv_cols<-sfc(20)
+names(lcmv_cols)<-levels(factor(fish.integrated$ClusterNames))
+
+rna_cols <- paletteContinuous(n=8)[c(1:3, 6:8)]
+
+set.seed(1234)
+```
+
+#Make object
+```{r, echo=F}
+folders<-list.files(file.path(DATA_DIR), include.dirs = T, full.names = T)
+folders <- folders[10]
+#debug(load_cellranger_data_h5)
+cds<-m3addon::load_cellranger_data_h5(folders, samplenames = basename(folders))
+ccol<-pals::glasbey(n=15)
+names(ccol)<-levels(pData(cds)$sample)
+prot<-cds[fData(cds)$feature_type=="Antibody Capture",]
+prot<-as.matrix(t(exprs(prot)))
+log_prot<-log(prot)
+colnames(log_prot)<-paste0("Log_", colnames(log_prot))
+
+cds<-cds[fData(cds)$feature_type=="Gene Expression",]
+pData(cds)<-cbind(pData(cds), cbind(prot, log_prot) )
+cds<-estimate_size_factors(cds)
+cds<-detect_genes(cds)
+cds<-calculate_gene_dispersion(cds, method = "m3addon")
+```
+
+## Metrics
+```{r, echo=F, results="as.is"}
+se<-lapply(folders, function(folder) read.csv(file.path(folder, "outs", "metrics_summary.csv")))
+names(se)<-basename(folders)
+se<-do.call(rbind, se)
+knitr::kable(se)
+```
+
+## UMI per cell per sample
+```{r, echo=F}
+pData(cds)$n_umi<-colSums(exprs(cds))
+pData(cds)$n_gene<-apply(exprs(cds), 2, function(col) {
+  as.numeric(col)
+  length(which(col!=0))})
+pData(cds)$log_umi<-log(pData(cds)$n.umi, base=10)
+qc<-data.frame(umi_per_cell=pData(cds)$n_umi, sample=pData(cds)$sample, gene_per_cell=pData(cds)$n_gene, log_umi=pData(cds)$log_umi)
+
+ggplot(qc, aes(x=umi_per_cell, fill=sample))+
+  geom_density(alpha=0.4)+scale_fill_manual(values=ccol)
+
+ggplot(qc, aes(x=log_umi, fill=sample))+
+  geom_density(alpha=0.4)+scale_fill_manual(values=ccol)
+```
+
+
+## Dimensionality Reduction
+Let's look at a plot of log normalized mean gene expression (x axis) and log of CV^2 (y axis).  Blue dots indicate those genes used in downstream clustering as they are the most variant genes irrespective of expression level. 
+```{r, echo=F}
+#plot_gene_dispersion(cds)
+cds<-select_genes(cds, fit_min = 1.03, logmean_ll = -5)
+plot_gene_dispersion(cds)+SFtheme
+cds<-preprocess_cds(cds, num_dim = 50,  verbose = T, use_genes = get_ordering_genes(cds))
+```
+
+Now let's look at the % variance PCs for all of these genes across all cells.
+```{r, echo=F}
+plot_pc_variance_explained(cds)
+```
+
+## UMAP clustering
+
+The top 20 PCs will be fed into UMAP...
+```{r, echo=F, include=F}
+cds<-reduce_dimension(cds, reduction_method = "UMAP", num_dim = 30, verbose=T, cores=2)
+#cds<-cluster_cells(cds, reduction_method = "PCA", resolution = 2e-3, verbose = T)
+cds<-cluster_cells(cds, resolution = 3e-4, verbose=F)
+
+```
+
+```{r, echo=F}
+plot_cells(cds, color_cells_by = "sample", label_cell_groups = F, cell_size = 0.2)+scale_color_manual(values=ccol)
+```
+
+## QC Plots on UMAP embedding
+```{r}
+mito.genes <- fData(cds)$id[grep(pattern = "^mt-", x = fData(cds)$gene_short_name)]
+pData(cds)$percent.mito <- Matrix::colSums(exprs(cds[mito.genes, ]))/Matrix::colSums(exprs(cds))
+pData(cds)$likely_dead <- pData(cds)$percent.mito>0.05
+
+
+plot_cells(cds, color_cells_by = "percent.mito", label_cell_groups = F)
+plot_cells(cds, color_cells_by = "likely_dead", label_cell_groups = F)
+plot_cells(cds, color_cells_by = "n.umi", label_cell_groups = F)
+plot_cells(cds, color_cells_by = "log_umi", label_cell_groups = F)
+```
+
+## Scrublet
+```{r, echo=F}
+cds<-scrublet_R(cds, expected_doublet_rate = 0.12)
+```
+
+
+## Remove dead cells, doublets and cells outside this range
+```{r, echo=F}
+cds$h1<-cds$Log_H1>5
+cds$h2<-cds$Log_H2>5.2
+cds$h3<-cds$Log_H3>5
+
+cds$ab_doublet<-cds$h1 & cds$h2 | cds$h2 & cds$h3 | cds$h1 & cds$h3
+
+plot_cells(cds, color_cells_by = "ab_doublet", label_cell_groups = F)
+plot_cells(cds, color_cells_by = "predicted_doublets", label_cell_groups = F)
+
+lt<-log10(2000)
+ht<-log10(20000)
+ggplot(qc, aes(x=log_umi, fill=sample))+
+  geom_density(alpha=0.4)+scale_fill_manual(values=ccol)+geom_vline(xintercept = c(lt, ht))
+
+cdsT<-cds[,pData(cds)$log_umi>lt & pData(cds)$log_umi < ht & !colData(cds)$ab_doublet]
+cdsT<-cdsT[,!pData(cdsT)$likely_dead]
+
+#plot_cells(cdsT, color_cells_by = "ab_doublet", label_cell_groups = F)
+
+cdsT<-select_genes(cdsT,  logmean_ll = -6, top_n = 2000)
+cdsT<-preprocess_cds(cdsT, num_dim = 50,  verbose = T, use_genes = get_selected_genes(cdsT))
+cdsT<-reduce_dimension(cdsT, reduction_method = "UMAP", num_dim = 25, verbose=T, cores=2)
+```
+
+```{r, echo=F, include=F}
+cdsT<-cluster_cells(cdsT, resolution = 3e-4, verbose=T)
+```
+
+## Plots of Hashes and Ab
+```{r, echo=F}
+#colnames(pData(cdsT))
+plot_cells(cdsT, color_cells_by = "Log_H1",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+plot_cells(cdsT, color_cells_by = "Log_H2",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+plot_cells(cdsT, color_cells_by = "Log_H3",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+
+lpd<-pData(cdsT)[grep("Log_", colnames(pData(cdsT)))] 
+lpd$Cell<-rownames(lpd)
+colnames(lpd)<-gsub("Log_", "", colnames(lpd))
+lpd<-data.table::as.data.table(lpd)
+pd<-lpd %>% tidyr::pivot_longer(-Cell, values_to = "Log_Expression", names_to = "Ab")
+```
+
+## Thresholds for Hashes
+```{r, echo=F}
+threshes<-data.frame(Ab=c("H1","H2","H3"), Log_Expression=c(5,5.2, 5))
+ggplot(pd, aes(x=Ab, y=Log_Expression, fill=Ab))+
+  geom_violin(scale="width")+geom_point(data=threshes, shape=95, size=20)+ theme(legend.position = "none")
+
+```
+
+## Remove outliers Hashes
+```{r}
+plot_cells(cdsT, color_cells_by = "Log_TIGIT",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+
+min_cite<-0
+max_cite<-3
+
+cites<-paste0("Log_", c("TIGIT", "TIM3","PD1"))
+
+for(i in cites){
+colData(cdsT)[[i]][colData(cdsT)[[i]]<min_cite]<-min_cite
+colData(cdsT)[[i]][colData(cdsT)[[i]]>max_cite]<-max_cite
+}
+
+plot_cells(cdsT, color_cells_by = "Log_PD1",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+plot_cells(cdsT, color_cells_by = "Log_TIGIT",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+plot_cells(cdsT, color_cells_by = "Log_TIM3",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+plot_cells(cdsT, color_cells_by = "Log_H1",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+plot_cells(cdsT, color_cells_by = "Log_H2",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+plot_cells(cdsT, color_cells_by = "Log_H3",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+
+plot_cells(cdsT, gene="Cd4",  label_cell_groups = F, cell_size = 0.3)
+plot_cells(cdsT, gene="Foxp3",  label_cell_groups = F, cell_size = 0.3)
+plot_cells(cdsT, gene="Cd8a",  label_cell_groups = F, cell_size = 0.3)
+```
+
+## Remove satellite clusters
+```{r}
+plot_cells(cdsT, color_cells_by = "partition",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+cds<-cdsT[,partitions(cdsT) %in% c(1,2,3)]
+plot_cells(cds, color_cells_by = "partition",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+cds<-cluster_PCA(cds, resolution_parameter = 3e-3, dims=1:50)
+cds<-detect_genes(cds)
+cds<-calculate_gene_dispersion(cds)
+cds<-select_genes(cds,  logmean_ll = -6, top_n = 3000)
+#plot_gene_dispersion(cdsT)+SFtheme
+cds<-preprocess_cds(cds, num_dim = 50,  verbose = T, use_genes = get_selected_genes(cds))
+#plot_pc_variance_explained(cdsT)+SFtheme
+cds<-reduce_dimension(cds, reduction_method = "UMAP", num_dim = 30, verbose=T, cores=2)
+cds<-cluster_PCA(cds, method = "leiden", resolution_parameter = 2.5e-3, dims=1:50)
+plot_cells(cds, color_cells_by = "cluster", label_cell_groups = F, cell_size = 0.3)
+
+```
+
+#3d
+```{r}
+cds3d<-reduce_dimension(cds, reduction_method = "UMAP", max_components = 3, num_dim = 50, verbose=T, cores=2)
+cds3d$Cluster<-clusters(cds)
+#monocle3:::louvain_clustering
+#cds3d<-cluster_PCA(cds3d, k=20, dims=1:50, resolution_parameter = 3e-3, method = "leiden")
+cds3d<-cluster_cells(cds3d, resolution = 0.4e-3, verbose = T)
+plot_cells_3d(cds3d, color_cells_by = "cluster",  cell_size = 20, color_palette = sfc(13))
+cds$cluster_3d<-clusters(cds3d)
+plot_cells(cds, color_cells_by = "cluster_3d", label_cell_groups = F, cell_size = 0.3)
+#saveRDS(cds, file.path(CDS_DIR, "201120_filteredCDS.RDS"))
+
+```
+
+```{r}
+cds<-iterative_LSI(cds, binarize = T, resolution =rep(1e-3,3), num_dim = 20, num_features = c(4000,3000,3000))
+cds<-reduce_dimension(cds, reduction_method = "UMAP", preprocess_method = "LSI", num_dim =20, verbose=T, cores=2, umap.min_dist = 0.3, umap.save_model = file.path(CDS_DIR, "201204_Umapmodel"))
+plot_cells(cds, color_cells_by = "cluster_3d",  label_cell_groups = F, cell_size = 0.5)+SFtheme+scale_color_manual(values=sfc(10))
+
+# cdsi <-readRDS(file.path(CDS_DIR, "201204_cdsi.RDS"))
+
+```
+
+# id clusters
+```{r}
+cdsi <-readRDS(file.path(CDS_DIR, "201204_cdsi.RDS"))
+plot_cells(cdsi, color_cells_by = "cluster_3d", label_cell_groups = T)
+cdsi<- cluster_cells(cdsi, resolution = 0.0002)
+cdsi <- cdsi[,clusters(cdsi) != 6]
+plot_cells(cdsi, color_cells_by = "cluster", label_cell_groups = T)
+cdsi<- cluster_cells(cdsi, resolution = 0.001)
+plot_cells(cdsi, color_cells_by = "cluster", label_cell_groups = F)+scale_color_manual(values = cols)
+
+colData(cdsi)$cluster1 <- clusters(cdsi)
+
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == 3 | colData(cdsi)$cluster1 == 4]<-3
+
+colData(cdsi)$cluster1<- as.character(colData(cdsi)$cluster1)
+
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "1"]<-"Tgphex"
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "2"]<-"Tcm"
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "3"]<-"Tex_1"
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "4"]<-NULL
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "5"]<-"Gzma+_Tex"
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "6"]<-"Tpex"
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "7"]<-"Tex_cycling"
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "8"]<-"Tn"
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "9"]<-"Tem"
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "10"]<-"Teff"
+
+plot_cells(cdsi, color_cells_by = "cluster1", label_cell_groups = F, cell_size = 0.5)+scale_color_manual(values = cols)
+
+# saveRDS(cdsi, file.path(CDS_DIR, "11232021_cdsi.RDS"))
+
+```
+
+```{r Plot clusters}
+plot_cells(cdsi, color_cells_by = "cluster1", label_cell_groups = F, cell_size = 1)+scale_color_manual(values=cols)+theme_void()
+```
+
+
+################# Fig1 ####################
+Fig 1A
+```{r cells by sortgate}
+plot_cells(cdsi[,colData(cdsi)$pop != "FALSE"], color_cells_by = "pop", label_cell_groups = F, cell_size = 0.5)+scale_color_manual(values = c(  "#e3a405","#101b63","#b869bf", "gray"))
+```
+
+```{r RNA velocity and cluster}
+cdsi@reduce_dim_aux@listData[["UMAP"]]@listData[["model_file"]] <- file.path(CDS_DIR, "201204_Umapmodel")
+
+exprs <- t(assay(cdsi))
+col_data <- as.data.frame(colData(cdsi))
+row_data <- as.data.frame(rowData(cdsi))
+embedding <- reducedDim(cdsi, "UMAP")
+```
+
+```{python}
+import scanpy as sc
+
+adata_sce = sc.AnnData(X = r.exprs, obs = r.col_data, var = r.row_data)
+adata_sce.obsm['umap'] = r.embedding
+sc.pl.umap(adata_sce, color='cluster1')
+
+import scvelo as scv
+import os
+scv.set_figure_params()
+filename = os.path.join(r.DATA_DIR, "MM_relapsed/velocyto/MM_relapsed.loom")
+ldata = scv.read(filename, cache=True)
+adata = scv.utils.merge(adata_sce, ldata)
+
+
+scv.pp.filter_and_normalize(adata)
+scv.pp.moments(adata)
+scv.tl.velocity(adata, mode='stochastic')
+scv.tl.velocity_graph(adata)
+scv.pl.velocity_embedding_stream(adata, basis='umap', color="cluster1", smooth=0.4, min_mass=0, alpha=0.6)
+```
+
+
+#SEURAT HEATMAPS
+```{r Targeted heatmap of genes}
+cluster.averages <- AverageExpression(mm2, return.seurat = TRUE, group.by = "cluster1")
+
+tfs<-  c( "Lef1", "Tcf7", "Bach2","Jun", "Tox", "Maf", "Eomes", "Tbx21",  "Nr4a2", "Satb1", "Prdm1", "Irf4", "Batf")
+mat <- cluster.averages@assays$RNA@counts[tfs,] %>% as.matrix()
+mat<- t(scale(t(mat)))
+Heatmap(mat[,c("Tn", "Tcm","Tem","Tpex","Teff", "Tex_1","Gzma+_Tex", "Tgphex",  "Tex_cycling" )], col = h_cols, name = "Expression", row_names_gp = gpar(fontsize = 17), column_names_gp = gpar(fontsize = 17), column_names_rot = 60, cluster_columns = F)
+
+efs<-  c("Gzmb", "Gzma", "Gzmk", "Prf1", "Il10", "Ifng", "Il2", "Fasl", "Ccl2", "Ccl3", "Ccl4", "Ccl5", "Csf1")
+mat <- cluster.averages@assays$RNA@counts[efs,] %>% as.matrix()
+mat<- t(scale(t(mat)))
+Heatmap(mat[,c("Tn", "Tcm","Tem","Tpex","Teff", "Tex_1","Gzma+_Tex", "Tgphex",  "Tex_cycling" )], col = h_cols, name = "Expression", row_names_gp = gpar(fontsize = 17), column_names_gp = gpar(fontsize = 17), column_names_rot = 60, cluster_columns = F)
+
+act_in<-  c( "Mki67", "Entpd1", "Cd38", "Pdcd1", "Cd226", "Lag3", "Ctla4", "Cd244", "Nkg7", "Cd101", "Havcr2")
+mat <- cluster.averages@assays$RNA@counts[act_in,] %>% as.matrix()
+mat<- t(scale(t(mat)))
+Heatmap(mat[,c("Tn", "Tcm","Tem","Tpex","Teff", "Tex-1","Gzma+-Tex", "Maf+-Tex",  "Tex-cycling" )], col = h_cols, name = "Expression", row_names_gp = gpar(fontsize = 17), column_names_gp = gpar(fontsize = 17), column_names_rot = 60, cluster_columns = F)
+
+mem<- c("Cd44",  "Klrg1", "Ccr7", "Slamf6", "Il18r1", "Il7r", "Il2rb", "Sell", "Cxcr5", "Cx3cr1", "Ly6a", "Cd28")
+mat <- cluster.averages@assays$RNA@counts[mem,] %>% as.matrix()
+mat<- t(scale(t(mat)))
+Heatmap(mat[,c("Tn", "Tcm","Tem","Tpex","Teff", "Tex-1","Gzma+-Tex", "Maf+-Tex",  "Tex-cycling" )], col = h_cols, name = "Expression", row_names_gp = gpar(fontsize = 17), column_names_gp = gpar(fontsize = 17), column_names_rot = 60, cluster_columns = F)
+```
+
+Supplemental Fig1A
+#Feature Plots
+```{r}
+FeaturePlot_scCustom(mm2, features = "Batf", max.cutoff = "q99", reduction = "RNA_UMAP", pt.size = 0.6, order = T, colors_use =  c("#3361A5", "#1E97F7", "#61C4F4",  "#F0C86D" ,"#EC5724" ,"#A31D1D"), na_color = "gray85")+NoAxes()
+
+FeaturePlot_scCustom(mm2, features = "Ifng", max.cutoff = "q99", reduction = "RNA_UMAP", pt.size = 0.6, order = T, colors_use =  c("#3361A5", "#1E97F7", "#61C4F4",  "#F0C86D" ,"#EC5724" ,"#A31D1D"), na_color = "gray85")+NoAxes()
+
+FeaturePlot_scCustom(mm2, features = "Tcf7", max.cutoff = "q99", reduction = "RNA_UMAP", pt.size = 0.6, order = T, colors_use =  c("#3361A5", "#1E97F7", "#61C4F4",  "#F0C86D" ,"#EC5724" ,"#A31D1D"), na_color = "gray85")+NoAxes()
+
+FeaturePlot_scCustom(mm2, features = "Maf", max.cutoff = "q99", reduction = "RNA_UMAP", pt.size = 0.6, order = T, colors_use =  c("#3361A5", "#1E97F7", "#61C4F4",  "#F0C86D" ,"#EC5724" ,"#A31D1D"), na_color = "gray85")+NoAxes()
+
+FeaturePlot_scCustom(mm2, features = "Gzmb", max.cutoff = "q99", reduction = "RNA_UMAP", pt.size = 0.6, order = T, colors_use =  c("#3361A5", "#1E97F7", "#61C4F4",  "#F0C86D" ,"#EC5724" ,"#A31D1D"), na_color = "gray85")+NoAxes()
+
+FeaturePlot_scCustom(mm2, features = "Gzma", max.cutoff = "q99", reduction = "RNA_UMAP", pt.size = 0.6, order = T, colors_use =  c("#3361A5", "#1E97F7", "#61C4F4",  "#F0C86D" ,"#EC5724" ,"#A31D1D"), na_color = "gray85")+NoAxes()
+
+FeaturePlot_scCustom(mm2, features = "Tox", max.cutoff = "q99", reduction = "RNA_UMAP", pt.size = 0.6, order = T, colors_use =  c("#3361A5", "#1E97F7", "#61C4F4",  "#F0C86D" ,"#EC5724" ,"#A31D1D"), na_color = "gray85")+NoAxes()
+
+FeaturePlot_scCustom(mm2, features = "Prf1", max.cutoff = "q99", reduction = "RNA_UMAP", pt.size = 0.6, order = T, colors_use =  c("#3361A5", "#1E97F7", "#61C4F4",  "#F0C86D" ,"#EC5724" ,"#A31D1D"), na_color = "gray85")+NoAxes()
+
+FeaturePlot_scCustom(mm2, features = "Cx3cr1", max.cutoff = "q99", reduction = "RNA_UMAP", pt.size = 0.6, order = T, colors_use =  c("#3361A5", "#1E97F7", "#61C4F4",  "#F0C86D" ,"#EC5724" ,"#A31D1D"), na_color = "gray85")+NoAxes()
+
+FeaturePlot_scCustom(mm2, features = "Ly6a", max.cutoff = "q99", reduction = "RNA_UMAP", pt.size = 0.6, order = T, colors_use =  c("#3361A5", "#1E97F7", "#61C4F4",  "#F0C86D" ,"#EC5724" ,"#A31D1D"), na_color = "gray85")+NoAxes()
+
+FeaturePlot_scCustom(mm2, features = "Cd28", max.cutoff = "q99", reduction = "RNA_UMAP", pt.size = 0.6, order = T, colors_use =  c("#3361A5", "#1E97F7", "#61C4F4",  "#F0C86D" ,"#EC5724" ,"#A31D1D"), na_color = "gray85")+NoAxes()
+```
+
+
+Fig 1B
+#Project Schietinger solid tumor data
+```{r}
+f<-list.files(file.path(DATA_DIR,"GSE126973_RAW"), full.names = T)
+
+dl<-lapply(f, function(file){
+  dat<-fread(file)
+  df<-DataFrame(dat[[grep(".bam$", colnames(dat))]], row.names = dat$Geneid, stringsAsFactors = F)
+  colnames(df)<-gsub(".merged.bam", "", colnames(dat)[grep(".bam$", colnames(dat))])
+  df
+  })
+mat<-as.matrix(do.call(cbind, dl))
+colnames(mat)
+g<-GEOquery::getGEO("GSE126973")
+l1<-g$GSE126973_series_matrix.txt.gz@phenoData@data$supplementary_file_1 %>% strsplit("_") %>% sapply("[[",2)
+l2<-gsub(".gene.counts.txt.gz", "", l1)
+
+pdata<-g$GSE126973_series_matrix.txt.gz@phenoData@data
+mat<-mat[,match(colnames(mat), l2)]
+pdata$group<-factor(strsplit(l2, "-") %>% sapply("[[", 1))
+pdata$sample<-l2
+dds<-DESeq2::DESeqDataSetFromMatrix(mat, colData = pdata, design=~group)
+sampleConditions <-  factor(make.names(dds$group))
+isexpr <- rowSums(edgeR::cpm(counts(dds)) > 1) >= min(table(sampleConditions))
+dds <- dds[isexpr,]
+dds<-DESeq(dds)
+res <- results(dds)
+plotMA(res, ylim=c(-10,10))
+vsd<-vst(dds)
+
+pd<-project_data(projector = cdsi, projectee = dds, make_pseudo_single_cells = T)
+
+p<-as.data.frame(do.call(rbind, pd[2:1]))
+cdata<-colData(dds)[match(p$Type, colnames(dds)),]
+cd<-apply(cdata, 1, function(v) v[is.na(v)]<-"scRNAseq")
+rownames(cdata)<-rownames(p)
+p<-cbind(p, cdata)
+p$exp<-p[["biological context:ch1"]]
+ggplot(p, aes(x=UMAP1, y=UMAP2, color=group))+geom_point(size=0.4)+SFtheme+scale_color_manual(values=sfc(8), na.value="grey80")+ guides(colour = guide_legend(override.aes = list(size=5)))+facet_wrap(~exp)
+
+ggplot(p, aes(x=UMAP1, y=UMAP2, color=group))+geom_point(size=0.4)+SFtheme+scale_color_manual(values=sfc(8), na.value="grey80")+ guides(colour = guide_legend(override.aes = list(size=5)))
+
+df<-data.frame(DN=cdsi$Log_H1, CD38posCD101neg=cdsi$Log_H2, DP=cdsi$Log_H3)
+cdsi$SortedCell<-colnames(df)[apply(df,1,which.max)]
+
+plot_cells(cdsi, color_cells_by = "SortedCell",  label_cell_groups = F, cell_size = 0.7)+SFtheme+scale_color_manual(values=sfc(3))+theme_void()
+
+plot_cells(cdsi, color_cells_by = "cluster1",  label_cell_groups = F, cell_size = 0.7)+SFtheme+scale_color_manual(values=sfc(10))+theme_void()
+
+p$group2<-as.character(p$group)
+
+p$group2[is.na(p$group2)]<-"zcRNAseq"
+table(p$group2)
+table(subset(p, p$group2 %in% c("N", "zcRNAseq"))$group2)
+ggplot(subset(p, p$group2 %in% c("N", "zcRNAseq")), aes(x=UMAP1, y=UMAP2, color=group))+geom_point(size=0.4)+SFtheme+scale_color_manual(values=sfc(8)[3], na.value="grey80")+ guides(colour = guide_legend(override.aes = list(size=5)))+theme_void()
+
+ggplot(subset(p, p$group2 %in% c("TOX","mGFP", "zcRNAseq")), aes(x=UMAP1, y=UMAP2, color=group))+geom_point(size=0.4)+SFtheme+scale_color_manual(values=sfc(8)[c(2,6)], na.value="grey80")+ guides(colour = guide_legend(override.aes = list(size=5)))+theme_void()
+
+ggplot(subset(p, p$group2 %in% c("SV40","OT1", "zcRNAseq")), aes(x=UMAP1, y=UMAP2, color=group))+geom_point(size=0.4)+SFtheme+scale_color_manual(values=sfc(8)[c(4,5)], na.value="grey80")+ guides(colour = guide_legend(override.aes = list(size=5)))+theme_void()
+
+ggplot(subset(p, p$group2 %in% c("KO","WT", "zcRNAseq")), aes(x=UMAP1, y=UMAP2, color=group))+geom_point(size=0.4)+SFtheme+scale_color_manual(values=sfc(8)[c(1,7)], na.value="grey80")+ guides(colour = guide_legend(override.aes = list(size=5)))+theme_void()
+```
+
+
+Fig 1C
+#polyclonal data (ring)
+```{r}
+files<-list.files("../extdata/polyclonal/GSE146609_RAW")
+dirs<-paste0("../extdata/polyclonal/GSE146609_RAW/", files)
+mat<- Matrix::readMM(dirs[1])
+
+bcs<-read.table("../extdata/polyclonal/GSE146609_barcodes.tsv.gz")
+genes<-read.table("../extdata/polyclonal/GSE146609_genes.tsv.gz")
+
+rownames(mat)<-genes$V2 %>% make.unique()
+colnames(mat)<-bcs$V1
+
+mat<-mat[which(rowSums(mat)>10),which(colSums(mat)>10)]
+
+dim(mat)
+
+poly<-CreateSeuratObject(counts = mat %>% as.sparse())
+
+# store mitochondrial percentage in object meta data
+poly <- PercentageFeatureSet(poly, pattern = "^mt-", col.name = "percent.mt")
+
+poly <- subset(poly, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+
+# run sctransform
+poly <- SCTransform(poly, method = "glmGamPoi", vars.to.regress = "percent.mt", verbose = T)
+
+# These are now standard steps in the Seurat workflow for visualization and clustering
+poly <- RunPCA(poly, verbose = T)
+poly <- RunUMAP(poly, dims = 1:15, verbose = T)
+
+poly <- FindNeighbors(poly, dims = 1:15, verbose = T)
+poly <- FindClusters(poly, verbose = T)
+DimPlot(poly, label = TRUE) + NoLegend()
+```
+Clusters containing the following cell types were identified using cell type markers: Tumour cells (eGFP), Myeloid cells (Cd68), NK cells (Ncr1), T cells (Cd3e), Neutrophils (Lcn2), and subsets of these groups were identified by markers noted in heatmaps
+```{r}
+rownames(poly)[grep("eGFP", rownames(poly))]
+#tumor
+FeaturePlot_scCustom(poly,"gene-eGFP")
+#myeloid
+FeaturePlot_scCustom(poly,"Cd68")
+#NKS
+FeaturePlot_scCustom(poly,"Ncr1")
+#Neutrophils
+FeaturePlot_scCustom(poly,"Lcn2")
+
+#Tcells
+FeaturePlot_scCustom(poly,"Cd3e")
+
+poly_t<-poly[,poly$seurat_clusters %in% c(3,7,12,8,1)]
+
+poly_t <- SCTransform(poly_t, method = "glmGamPoi", vars.to.regress = "percent.mt", verbose = T)
+
+# These are now standard steps in the Seurat workflow for visualization and clustering
+poly_t <- RunPCA(poly_t, verbose = T)
+poly_t <- RunUMAP(poly_t, dims = 1:8, verbose = T)
+
+poly_t <- FindNeighbors(poly_t, dims = 1:8, verbose = T)
+poly_t <- FindClusters(poly_t, verbose = T)
+DimPlot(poly_t, label = TRUE) + NoLegend()
+```
+
+id our signature
+```{r}
+DefaultAssay(poly_t)<-"SCT"
+FeaturePlot_scCustom(poly_t, features = c("Havcr2", "Ifng","Tox", "Batf", "Prf1", "Gzma", "Gzmb",  "Cd4", "Cd8a"), colors_use = rna_cols)
+
+poly_t$seurat_clusters
+mm2$cluster1
+
+#get rid of Cd4s
+poly_t<-poly_t[,!poly_t$seurat_clusters %in% c(2,5)]
+
+poly_t <- SCTransform(poly_t, method = "glmGamPoi", vars.to.regress = "percent.mt", verbose = T)
+
+# These are now standard steps in the Seurat workflow for visualization and clustering
+poly_t <- RunPCA(poly_t, verbose = T)
+poly_t <- RunUMAP(poly_t, dims = 1:8, verbose = T)
+
+poly_t <- FindNeighbors(poly_t, dims = 1:8, verbose = T)
+poly_t <- FindClusters(poly_t, verbose = T)
+DimPlot(poly_t, label = TRUE) + NoLegend()
+```
+
+logistic regression
+```{r}
+library(viewmaster)
+library(doMC)
+
+pcds<-seurat_to_monocle3(poly_t)
+
+vg<-common_variant_genes(cdsi, pcds, top_n = 5000)
+
+pcds<-viewmastR::viewmastR(ref_cds = cdsi, query_cds = pcds, ref_celldata_col = "cluster1",selected_genes = vg, verbose=T, FUNC = "softmax_regression", tf_idf = F, learning_rate = 1)
+
+plot_cells(pcds, color_cells_by = "smr_celltype", cell_size = 1)
+
+poly_t$smr_celltype<-pcds$smr_celltype
+
+tab<-table(poly_t$seurat_clusters, poly_t$smr_celltype) %>% as.matrix()
+tab<-sweep(tab, 2, colSums(tab), '/')
+
+pdf("../extdata/polyclonal/cd8_pbs_umap.pdf", width = 4, height = 4)
+DimPlot(poly_t, label = F, cols = paletteDiscrete(values = levels(factor(poly_t$seurat_clusters)), set = "paired"), pt.size = 1)&NoAxes()
+dev.off()
+
+pdf("../extdata/polyclonal/fish_polycloncal_correlation_heatmap.pdf", width = 6, height =6)
+pheatmap::pheatmap(tab, cluster_rows = T, cluster_cols=T, color = viridis(10), display_numbers = F)
+dev.off()
+```
+
+
+Fig 1D  & Supplemental Fig 1C
+#run cca to co-embed fishand lcmv
+```{r}
+lcmv<-readRDS(file.path(EXT_DIR, "LCMV_Arm_Cl13.Rds"))
+DimPlot(lcmv, group.by = "ClusterNames")
+
+# find anchors
+anchors <- FindIntegrationAnchors(object.list = list(mm2, lcmv))
+
+# integrate data
+fish.integrated <- IntegrateData(anchorset = anchors)
+
+# Run the standard workflow for visualization and clustering
+fish.integrated  <- ScaleData(fish.integrated , verbose = FALSE)
+fish.integrated  <- RunPCA(fish.integrated , npcs = 50, verbose = FALSE)
+ElbowPlot(fish.integrated)
+fish.integrated  <- RunUMAP(fish.integrated , reduction = "pca", dims = 1:20, verbose = FALSE)
+
+
+fish.integrated$cluster1<-mm2$cluster1
+fish.integrated$ClusterNames<-lcmv$ClusterNames
+
+is.na(fish.integrated$cluster1) %>% table()
+fish.integrated$cluster1[is.na(fish.integrated$cluster1)]<-"X"
+fish.integrated$ClusterNames[is.na(fish.integrated$ClusterNames)]<-"X"
+table(fish.integrated$cluster1)
+table(fish.integrated$ClusterNames)
+
+fish.integrated$cluster1<-factor(fish.integrated$cluster1, levels = c("X", "Gzma+_Tex",  "Tgphex" , "Tcm" ,  "Teff" , "Tem","Tex_1", "Tex_cycling", "Tn", "Tpex"))
+
+table(fish.integrated$ClusterNames)
+table(fish.integrated$ClusterNames)
+```
+
+```{r}
+p1 <- DimPlot(fish.integrated, order =T ,reduction = "umap", group.by = "cluster1", cols =  c("gray80", "#16482A", "#45AC49","#50191E", "#bc2cdb","#f0821d" ,"#3244a8","#2394C4","#ffc400","#DC3F32"), na.value =  "gray85", label = F)&NoAxes() 
+
+p3 <- DimPlot(fish.integrated, reduction = "umap", group.by = "ClusterNames", label = T, label.box = T,  na.value =  "gray85", cols =c(sfc(19), "gray80" ))+scale_fill_manual(values = rep("white", 20))&NoAxes()
+
+p1 +p3
+```
+
+```{r id acute and chronic cells}
+DimPlot(fish.integrated, reduction = "umap", group.by = "sampleID", label = F, label.box = F,  na.value =  "gray85", cols =sampleID_cols)+scale_fill_manual(values = rep("white", 20))&NoAxes()
+```
+
+Fig 1E
+#load control data from Tigit paper, re-embed-plot clonality
+```{r}
+ROOT_DIR<-"/fh/fast/furlan_s/grp/experiments/648_Tigitdata"
+DATA_DIR <- file.path(ROOT_DIR, "data")      # SPECIFY HERE
+RES_DIR  <- file.path(ROOT_DIR,  "res")     # SPECIFY HERE
+RMD_DIR  <- file.path(ROOT_DIR,"rmd")     # SPECIFY HERE
+CDS_DIR <- file.path(ROOT_DIR,   "cds")
+
+cds<-readRDS(file.path(CDS_DIR, "tigit_cds.rds"))
+tig<-monocle3_to_seurat(cds)
+tig<-FindVariableFeatures(tig)
+tig<-ScaleData(tig)
+
+samps<-list.files(DATA_DIR)[2:5]
+folders<-list.files(file.path(DATA_DIR), full.names = T)
+colnames(cds)
+tcrl<-lapply(samps, function(x){
+  tcr<-read.csv(file.path(DATA_DIR, x, "filtered_contig_annotations.csv"))
+  tcr
+})
+#edit vdj files so barcodes match the cell colnames
+tcrl2 <- lapply(1:length(tcrl), function(x){
+  met<-tcrl[[x]]
+  met$barcode<-gsub("-1", paste0("-",x), met$barcode)
+  met
+})
+
+combined <- combineTCR(tcrl, samples = samps, cells ="T-AB")
+combined$Gp1_VDJ$barcode<-gsub(".*_", "", combined$Gp1_VDJ$barcode)
+combined$Gp2_VDJ$barcode<-gsub(".*_", "", combined$Gp2_VDJ$barcode)
+combined$Gp3_VDJ$barcode<-gsub(".*_", "", combined$Gp3_VDJ$barcode)
+combined$Gp4_VDJ$barcode<-gsub(".*_", "", combined$Gp4_VDJ$barcode)
+
+combined$Gp1_VDJ$barcode<-gsub("Gp1_VDJ_", "", combined$Gp1_VDJ$barcode)
+combined$Gp2_VDJ$barcode<-gsub("Gp2_VDJ_", "", combined$Gp2_VDJ$barcode)
+combined$Gp2_VDJ$barcode<-gsub("1", "2", combined$Gp2_VDJ$barcode)
+combined$Gp3_VDJ$barcode<-gsub("Gp3_VDJ_", "", combined$Gp3_VDJ$barcode)
+combined$Gp3_VDJ$barcode<-gsub("1", "3", combined$Gp3_VDJ$barcode)
+combined$Gp4_VDJ$barcode<-gsub("Gp4_VDJ_", "", combined$Gp4_VDJ$barcode)
+combined$Gp4_VDJ$barcode<-gsub("1", "4", combined$Gp4_VDJ$barcode)
+
+seu <- combineExpression(combined, tig, 
+                  cloneCall="aa", 
+                  proportion = FALSE, 
+                  cloneTypes=c(Single=1, Small=5, Medium=20, Large=100, Hyperexpanded=500))
+
+con<-seu[, seu$sample_id == "648_Tigit_Gp4"]
+con <-NormalizeData(con)
+con<-FindVariableFeatures(con)
+con<-ScaleData(con)
+con <- SCTransform(con, method = "glmGamPoi", vars.to.regress = "percent.mito")
+con <- RunPCA(con, features = VariableFeatures(con))
+ElbowPlot(con, ndims = 30)
+con<-RunUMAP(con, dims = 1:20, verbose = T, reduction.name = "SCT_UMAP")
+DimPlot(con, reduction = "SCT_UMAP", group.by = "sample_id")
+
+
+slot(con, "meta.data")$cloneType <- factor(slot(con, "meta.data")$cloneType, 
+                levels = c("Hyperexpanded (100 < X <= 500)", 
+                           "Large (20 < X <= 100)", 
+                            "Medium (5 < X <= 20)", 
+                            "Small (1 < X <= 5)", 
+                            "Single (0 < X <= 1)", NA))
+
+con$cloneType<-as.character(con$cloneType)
+
+con$cloneType[which(is.na(con$cloneType))]<-"NA"
+con$cloneType
+
+con$cloneType<-factor(con$cloneType, levels= rev(c("Hyperexpanded (100 < X <= 500)", "Large (20 < X <= 100)", "Medium (5 < X <= 20)", "Small (1 < X <= 5)",  "Single (0 < X <= 1)", "NA")))
+
+DimPlot(con, group.by = "cloneType", order = T)+scale_color_manual(values =c("gray80",rev(brewer.spectral(n=5))))&NoAxes()
+```
+
+#use cdsi to annotate control tigit data
+```{r}
+plot_cells(cdsi, color_cells_by = "cluster1")
+
+con<-seurat_to_monocle3(con, seu_rd = "SCT_UMAP")
+cols <- c( "Gzma+_Tex" = "#16482A","Tgphex"="#45AC49","Tcm" ="#50191E","Teff"= "#bc2cdb","Tem"="#f0821d" , "Tex_1"=  "#3244a8", "Tex_cycling"= "#2394C4", "Tn"= "#ffc400", "Tpex"= "#DC3F32")
+
+vg<-common_variant_genes(cdsi, con, top_n = 1000)
+cds<-viewmaster(ref_cds  = cdsi, query_cds =con, ref_celldata_col = "cluster1", selected_genes = vg, verbose=T, FUNC = "softmax_regression", tf_idf = F, iterations = 1500)
+
+cds$smr_celltype<-factor(cds$smr_celltype, levels = levels(factor(cds$smr_celltype))[c(1:2, 4:10,3)])
+
+con$smr_celltype<-cds$smr_celltype
+DimPlot(con, group.by = "smr_celltype", order = F)+scale_color_manual(values = cols)&NoAxes()
+```
+
+Fig 1F
+#Braun et al Progessive immune dysfunction
+```{r}
+genes<-read.csv(file = "../gene_sets/Wu_progressive_immune.csv")
+genes$Cluster_Name %>% table()
+
+tex<-genes[grep("Terminally", genes$Cluster_Name),] %>% group_by(Cluster_Name) %>% filter(logFC > 0.25)
+t_genes<-str_to_title(tex$gene)
+
+mm2<-AddModuleScore(mm2, features = list(t_genes), name = "Braun")
+
+FeaturePlot_scCustom(mm2, features = "Braun1", pt.size = 0.7)+scale_color_gradientn(colors = paletteContinuous(n=8)[c(1:3, 6:8)])&NoAxes()
+
+cdsi$braun1<-mm2$Braun1
+
+plot_cells(cdsi[,order(cdsi$braun1)], color_cells_by = "braun1", cell_size = 1)
+```
+
+Fig 1G
+#Human tumor TCR gene set
+```{r}
+h_genes<-read.csv(file = "../gene_sets/Human neoantigen gene set.csv")
+h_genes<-str_to_title(h_genes$NeoTCR8.ALL)
+
+mm2<-AddModuleScore(mm2, features = list(h_genes), name = "Human")
+
+VlnPlot(mm2, features = "Human1", cols =cols, group.by = "cluster1" , pt.size = 0)+ggtitle(label="neoantigen human geneset")
+```
+
+
+
+
+
+
+################# Fig2 ####################
+
+#TIM3/PD1 ANALYSIS
+
+Fig 2A
+```{r CITE Seq analysis}
+pData(cdsi)$Log_PD1 <- colData(cdsi)$Log_PD1
+
+pData(cdsi)$Log_TIM3 <- colData(cdsi)$Log_TIM3
+
+colData(cdsi)$PD1_pos <- rep(F, length(colnames(cdsi)))
+
+colData(cdsi)$PD1_pos[which(colData(cdsi)$Log_PD1 > 2)] <- T
+
+pData(cdsi)$PD1_pos <- colData(cdsi)$PD1_pos
+
+colData(cdsi)$PD1_pos[which(colData(cdsi)$Log_TIM3 > 2 & colData(cdsi)$PD1_pos == T )] <- "PD1+_TIM3+"
+
+colData(cdsi)$PD1_pos[which(colData(cdsi)$Log_TIM3 < 2 &colData(cdsi)$PD1_pos == T)] <- "PD1+_TIM3-"
+
+colData(cdsi)$PD1_pos[which(colData(cdsi)$PD1_pos == F)] <- "PD1-"
+
+table(colData(cdsi)$PD1_pos)
+
+plot_cells(cdsi, color_cells_by = "PD1_pos", label_cell_groups = F, cell_size = 0.5)+scale_color_manual(values = c("#cfcbce", "#0d778c","#b51f50"))
+
+plot_genes_by_group(cdsi, markers = c("Ifng","Gzmb", "Il10", "Prf1"), group_cells_by = "PD1_pos", ordering_type = "none")+scale_color_gradientn(colours = c("#3361A5", "#1E97F7", "#61C4F4",  "#F0C86D" ,"#EC5724" ,"#A31D1D"))
+```
+
+Fig 2B
+#cytoxic molecules by PD1/TIM3+
+```{r}
+mm2$PD1_pos<-cdsi$PD1_pos
+VlnPlot(mm2, features = c("Ifng","Gzmb", "Prf1"), group.by = "PD1_pos", cols = c("#cfcbce", "#0d778c","#b51f50"))
+VlnPlot(mm2, features = c("Il10"), group.by = "PD1_pos", cols = c("#cfcbce", "#0d778c","#b51f50"))
+```
+
+
+
+################# ID signatures ####################
+
+#ID Maf cluster signature
+```{r DE}
+DimPlot(mm2, group.by = "cluster1")
+
+tex<-mm2[,grep("Tex",mm2$cluster1)]
+
+tex$maf<-"Other"
+tex$maf[grep("Maf",tex$cluster1)]<-"Maf"
+DimPlot(tex, group.by = "maf")+scale_color_manual(values = c("red", "grey50"))+theme_ArchR()
+
+maf_markers<-FindMarkers(tex, group.by = "maf", ident.1 = "Maf", ident.2 = "Other")
+
+#get rid of lnf values
+maf_markers$p_val_adj[maf_markers$p_val_adj == 0]<-1e-300
+
+maf_markers$maf<-T
+maf_markers$maf[maf_markers$avg_log2FC < 0]<-F
+
+maf_markers$neg_log_pval<- -log10(maf_markers$p_val_adj)
+
+maf_markers$gene<-rownames(maf_markers)
+
+pdf(file.path(FIG_DIR, "maf_volcano.pdf"), width = 6, height =4)
+ggplot(maf_markers, aes(x = avg_log2FC, y = neg_log_pval, fill = ifelse(abs(avg_log2FC) > 0.2 & neg_log_pval > 50, maf, "ns")))+geom_vline(xintercept = 0)+geom_hline(yintercept = 50, linetype= "dashed", color = "gray80")+geom_vline(xintercept = 0.2, linetype= "dashed", color = "gray80")+geom_vline(xintercept = -0.2 ,linetype= "dashed", color = "gray80")+geom_point(shape = 21)+geom_text_repel(fill = "white", size =3, aes(label = gene), min.segment.length = 0)+scale_fill_manual(values = c("black", "gray90", "red"))+theme_ArchR()
+
+dev.off()
+
+write.csv(maf_markers, file.path(RES_DIR, "maf_markers.csv"))
+```
+
+```{r Feature Plot}
+maf_sig<-maf_markers %>% dplyr::filter(-log10(p_val_adj) > 50 & avg_log2FC > 0.2) %>% dplyr::select(gene) %>% dplyr::filter(!grepl("^Rp", gene)) %>% dplyr::filter(!grepl("^mt", gene))
+
+genes<-c(maf_sig$gene, "Ifng")
+
+mm2<-AddModuleScore(mm2, features = list(genes), name = "Maf_signature")
+p<-FeaturePlot_scCustom(mm2, features = "Maf_signature1",  max.cutoff = "q99", reduction = "RNA_UMAP", pt.size = 0.6, order = T, colors_use =  c("#3361A5", "#1E97F7", "#61C4F4",  "#F0C86D" ,"#EC5724" ,"#A31D1D"), na_color = "gray85")+NoAxes()
+
+pdf(file.path(FIG_DIR, "Maf_signature_fish.pdf"), width = 6, height = 5)
+p
+dev.off()
+```
+
+```{r Frequency of Maf+ in cluster}
+FeaturePlot_scCustom(mm2, features = "Maf",  max.cutoff = "q99", reduction = "RNA_UMAP", pt.size = 0.6, order = T, colors_use =  c("#3361A5", "#1E97F7", "#61C4F4",  "#F0C86D" ,"#EC5724" ,"#A31D1D"), na_color = "gray85")+NoAxes()
+VlnPlot(tex , features = "Maf", pt.size = 0, group.by = "cluster1", cols = cols)&NoLegend()
+
+maf_mat<-mm2@assays$RNA["Maf",which(mm2$cluster1 == "Tgphex")] 
+maf_pos<-maf_mat[,which(colSums(maf_mat) > 1)] %>%names() %>% length()
+maf_neg<-maf_mat[,which(colSums(maf_mat) < 1)] %>%names() %>% length()
+
+df<-data.frame(ct = c(1326, 533), id = c(maf_pos, maf_neg), clus = c("maf", "maf"))
+p<-ggplot(df, aes(x=clus, y = ct, fill = id))+geom_bar(stat = "identity", position = "fill", color = "black")+scale_fill_gradientn(colors = c("lightgreen", cols[2]))+theme_classic()
+p
+```
+
+```{r comapre TIM3+ cells in Maf cluster to other TIM3+ cells}
+FeaturePlot_scCustom(mm2, features = "Log_TIM3",max.cutoff = "q99", reduction = "RNA_UMAP", pt.size = 0.6, order = T, colors_use =  paletteContinuous("whiteBlue"), na_color = "gray85")+NoAxes()
+VlnPlot_scCustom(mm2, features = "Log_TIM3", group.by = "cluster1", colors_use = cols)
+
+mm2$TIM3_pos<-F
+mm2$TIM3_pos[mm2$Log_TIM3 > 2]<-T
+
+DimPlot(mm2, group.by = "TIM3_pos", cols =c("gray85", "firebrick"))+NoAxes()
+
+df<- data.frame(table(mm2$cluster1, mm2$TIM3_pos))
+
+pdf("Plots/bar_plot_clusters_TIM3_pos.pdf", width =3, height =4)
+ggplot(df, aes(fill = Var1, y=Freq, x=Var2)) + 
+    geom_bar(stat = "identity",  position = "fill")+scale_fill_manual(values = fish_cols)+theme_classic()+RotatedAxis()+NoGrid()
+dev.off()
+```
+
+```{r DE}
+sub<-mm2[,mm2$TIM3_pos == T]
+sub$maf<-"Other"
+sub$maf[grep("Maf",sub$cluster1)]<-"Maf"
+
+maf_tim3_markers<-FindMarkers(sub, group.by = "maf", ident.1 = "Maf", ident.2 = "Other")
+DimPlot(sub, group.by = "maf",cols=c( "firebrick","gray85"))&NoAxes()
+
+maf_tim3_markers$maf<-T
+maf_tim3_markers$maf[maf_tim3_markers$avg_log2FC < 0]<-F
+
+maf_tim3_markers$neg_log_pval<- -log10(maf_tim3_markers$p_val_adj)
+
+maf_tim3_markers$gene<-rownames(maf_tim3_markers)
+
+pdf(file.path(FIG_DIR, "maf_volcano_tim3_pos.pdf"), width = 4, height =4)
+ggplot(maf_tim3_markers, aes(x = avg_log2FC, y = neg_log_pval, fill = ifelse(abs(avg_log2FC) > 0.2 & neg_log_pval > 50, maf, "ns")))+geom_vline(xintercept = 0)+geom_hline(yintercept = 50, linetype= "dashed", color = "gray80")+geom_vline(xintercept = 0.2, linetype= "dashed", color = "gray80")+geom_vline(xintercept = -0.2 ,linetype= "dashed", color = "gray80")+geom_point(shape = 21)+geom_text_repel(fill = "white", size =3, aes(label = gene), min.segment.length = 0)+scale_fill_manual(values = c("black", "gray90", "red"))+theme_ArchR()
+dev.off()
+
+write.csv(maf_tim3_markers, file.path(RES_DIR, "maf_markers_tim3_pos.csv"))
+```
+
+
+
+
+
+
+

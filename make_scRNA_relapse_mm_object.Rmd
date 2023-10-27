@@ -1,0 +1,327 @@
+---
+title: "Myeloma2_SM"
+author: "SNF"
+date: "10/07/20"
+output:
+  prettydoc::html_pretty:
+    theme: Cayman
+    highlight: github
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r, warning=FALSE, message=FALSE, warning=FALSE, echo=F}
+#devtools::install_github('scfurl/m3addon')
+rm(list=ls())
+knitr::opts_chunk$set(fig.width=8, fig.height=6,
+                      echo=FALSE, warning=FALSE, message=FALSE)
+knitr::opts_chunk$set(dev.args=list(bg="transparent"))
+ROOT_DIR<-"/fh/fast/furlan_s/user/owalt/exhaustion"
+stem<-"mm2"
+DATA_DIR <- file.path(ROOT_DIR,  stem, "data")      # SPECIFY HERE
+RES_DIR  <- file.path(ROOT_DIR,  stem, "res")     # SPECIFY HERE
+RMD_DIR  <- file.path(ROOT_DIR,  stem, "rmd")     # SPECIFY HERE
+CDS_DIR <- file.path(ROOT_DIR,  stem, "cds")
+FIG_DIR <- file.path(ROOT_DIR,  stem, "figs")
+EXT_DIR <- file.path(ROOT_DIR,  stem, "ext_data")
+
+dyn.load('/app/software/ArrayFire/3.8.1/lib64/libaf.so.3')
+library(RcppArrayFire)
+
+suppressPackageStartupMessages({
+  library(monocle3)
+  library(m3addon)
+  library(reticulate)
+  library(openxlsx)  
+  library(dplyr)
+  library(Matrix)
+  library(ggplot2)
+  #library(rhdf5)
+  #library(h5)
+  library(hdf5r)
+  library(xfun)
+  library(pals)
+  library(RColorBrewer)
+  library(ggrepel)
+  #library(knitr)
+  library(stringr)
+  library(Seurat)
+  library(ArchR)
+  library(ggsignif)
+  library(viridis)
+  library(ggpubr)
+  library(ComplexHeatmap)
+  library(scCustomize)
+  library(viewmaster)
+  library(tidyverse)
+  library(msigdbr)
+  library(fgsea)
+  library(scRepertoire)
+})
+
+set.seed(1234)
+
+#Load colors
+h_cols <-rev(brewer.pal(name = "RdYlBu", n = 7))
+
+fish_cols<-c("Gzma+_Tex" ="#16482A","Tgphex" = "#45AC49","Tcm" = "#50191E", "Teff"= "#bc2cdb","Tem" = "#f0821d" ,"Tex_1"= "#3244a8","Tex_cycling"="#2394C4","Tn"="#ffc400","Tpex"="#DC3F32" )
+
+rna_cols <- paletteContinuous(n=8)[c(1:3, 6:8)]
+```
+
+#Make object
+```{r, echo=F}
+cds<-m3addon::load_cellranger_data_h5("/fh/fast/furlan_s/user/owalt/exhaustion/mm2/data/MM_relapsed", samplenames = "MM_relapsed")
+ccol<-pals::glasbey(n=15)
+names(ccol)<-levels(pData(cds)$sample)
+prot<-cds[fData(cds)$feature_type=="Antibody Capture",]
+prot<-as.matrix(t(exprs(prot)))
+log_prot<-log(prot)
+colnames(log_prot)<-paste0("Log_", colnames(log_prot))
+
+cds<-cds[fData(cds)$feature_type=="Gene Expression",]
+pData(cds)<-cbind(pData(cds), cbind(prot, log_prot) )
+cds<-estimate_size_factors(cds)
+cds<-detect_genes(cds)
+cds<-calculate_gene_dispersion(cds, method = "m3addon")
+```
+
+## UMI per cell per sample
+```{r, echo=F}
+pData(cds)$n_umi<-colSums(exprs(cds))
+pData(cds)$n_gene<-apply(exprs(cds), 2, function(col) {
+  as.numeric(col)
+  length(which(col!=0))})
+pData(cds)$log_umi<-log(pData(cds)$n.umi, base=10)
+qc<-data.frame(umi_per_cell=pData(cds)$n_umi, sample=pData(cds)$sample, gene_per_cell=pData(cds)$n_gene, log_umi=pData(cds)$log_umi)
+
+ggplot(qc, aes(x=log_umi, fill=sample))+
+  geom_density(alpha=0.4)+scale_fill_manual(values=ccol)
+```
+
+## Dimensionality Reduction
+Let's look at a plot of log normalized mean gene expression (x axis) and log of CV^2 (y axis).  Blue dots indicate those genes used in downstream clustering as they are the most variant genes irrespective of expression level. 
+```{r, echo=F}
+cds<-select_genes(cds, fit_min = 1.03, logmean_ll = -5)
+plot_gene_dispersion(cds)+SFtheme
+cds<-preprocess_cds(cds, num_dim = 50,  verbose = T, use_genes = get_ordering_genes(cds))
+```
+
+Now let's look at the % variance PCs for all of these genes across all cells.
+```{r, echo=F}
+plot_pc_variance_explained(cds)
+```
+
+## UMAP clustering
+```{r, echo=F, include=F}
+cds<-reduce_dimension(cds, reduction_method = "UMAP", num_dim = 30, verbose=T, cores=2)
+cds<-cluster_cells(cds, resolution = 3e-4, verbose=F)
+```
+
+```{r, echo=F}
+plot_cells(cds, color_cells_by = "sample", label_cell_groups = F, cell_size = 0.2)+scale_color_manual(values=ccol)
+```
+
+## QC Plots on UMAP embedding
+```{r}
+mito.genes <- fData(cds)$id[grep(pattern = "^mt-", x = fData(cds)$gene_short_name)]
+pData(cds)$percent.mito <- Matrix::colSums(exprs(cds[mito.genes, ]))/Matrix::colSums(exprs(cds))
+pData(cds)$likely_dead <- pData(cds)$percent.mito>0.05
+
+
+plot_cells(cds, color_cells_by = "percent.mito", label_cell_groups = F)
+plot_cells(cds, color_cells_by = "likely_dead", label_cell_groups = F)
+plot_cells(cds, color_cells_by = "n.umi", label_cell_groups = F)
+plot_cells(cds, color_cells_by = "log_umi", label_cell_groups = F)
+```
+
+## Remove dead cells, doublets and cells outside this range
+```{r, echo=F}
+cds$h1<-cds$Log_H1>5
+cds$h2<-cds$Log_H2>5.2
+cds$h3<-cds$Log_H3>5
+
+cds$ab_doublet<-cds$h1 & cds$h2 | cds$h2 & cds$h3 | cds$h1 & cds$h3
+
+plot_cells(cds, color_cells_by = "ab_doublet", label_cell_groups = F)
+
+lt<-log10(2000)
+ht<-log10(20000)
+ggplot(qc, aes(x=log_umi, fill=sample))+
+  geom_density(alpha=0.4)+scale_fill_manual(values=ccol)+geom_vline(xintercept = c(lt, ht))
+
+cdsT<-cds[,pData(cds)$log_umi>lt & pData(cds)$log_umi < ht & !colData(cds)$ab_doublet]
+cdsT<-cdsT[,!pData(cdsT)$likely_dead]
+
+cdsT<-select_genes(cdsT,  logmean_ll = -6, top_n = 2000)
+cdsT<-preprocess_cds(cdsT, num_dim = 50,  verbose = T, use_genes = get_selected_genes(cdsT))
+cdsT<-reduce_dimension(cdsT, reduction_method = "UMAP", num_dim = 25, verbose=T, cores=2)
+```
+
+```{r, echo=F, include=F}
+cdsT<-cluster_cells(cdsT, resolution = 3e-4, verbose=T, cluster_method = 'louvain')
+```
+
+## Plots of Hashes and Ab
+```{r, echo=F}
+plot_cells(cdsT, color_cells_by = "Log_H1",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+plot_cells(cdsT, color_cells_by = "Log_H2",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+plot_cells(cdsT, color_cells_by = "Log_H3",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+
+lpd<-pData(cdsT)[grep("Log_", colnames(pData(cdsT)))] 
+lpd$Cell<-rownames(lpd)
+colnames(lpd)<-gsub("Log_", "", colnames(lpd))
+lpd<-data.table::as.data.table(lpd)
+pd<-lpd %>% tidyr::pivot_longer(-Cell, values_to = "Log_Expression", names_to = "Ab")
+```
+
+## Thresholds for Hashes
+```{r, echo=F}
+threshes<-data.frame(Ab=c("H1","H2","H3"), Log_Expression=c(5,5.2, 5))
+ggplot(pd, aes(x=Ab, y=Log_Expression, fill=Ab))+
+  geom_violin(scale="width")+geom_point(data=threshes, shape=95, size=20)+ theme(legend.position = "none")
+```
+
+## Remove outliers Hashes
+```{r}
+plot_cells(cdsT, color_cells_by = "Log_TIGIT",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+
+min_cite<-0
+max_cite<-3
+
+cites<-paste0("Log_", c("TIGIT", "TIM3","PD1"))
+
+for(i in cites){
+colData(cdsT)[[i]][colData(cdsT)[[i]]<min_cite]<-min_cite
+colData(cdsT)[[i]][colData(cdsT)[[i]]>max_cite]<-max_cite
+}
+
+plot_cells(cdsT, color_cells_by = "Log_PD1",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+plot_cells(cdsT, color_cells_by = "Log_TIGIT",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+plot_cells(cdsT, color_cells_by = "Log_TIM3",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+plot_cells(cdsT, color_cells_by = "Log_H1",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+plot_cells(cdsT, color_cells_by = "Log_H2",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+plot_cells(cdsT, color_cells_by = "Log_H3",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+
+plot_cells(cdsT, gene="Cd4",  label_cell_groups = F, cell_size = 0.3)
+plot_cells(cdsT, gene="Itgam",  label_cell_groups = F, cell_size = 0.3)
+plot_cells(cdsT, gene="Cd19",  label_cell_groups = F, cell_size = 0.3)
+plot_cells(cdsT, gene="Cd8a",  label_cell_groups = F, cell_size = 0.3)
+```
+
+## Remove satellite clusters
+```{r}
+plot_cells(cdsT, color_cells_by = "partition",  label_cell_groups = F, cell_size = 0.3)
+cds<-cdsT[,partitions(cdsT) %in% c(1,2,3)]
+plot_cells(cds, color_cells_by = "partition",  label_cell_groups = F, cell_size = 0.3)+SFtheme
+cds<-cluster_PCA(cds, resolution_parameter = 3e-3, dims=1:50)
+cds<-detect_genes(cds)
+cds<-calculate_gene_dispersion(cds)
+cds<-select_genes(cds,  logmean_ll = -6, top_n = 3000)
+
+cds<-preprocess_cds(cds, num_dim = 50,  verbose = T, use_genes = get_selected_genes(cds))
+
+cds<-reduce_dimension(cds, reduction_method = "UMAP", num_dim = 30, verbose=T, cores=2)
+cds<-cluster_PCA(cds, method = "leiden", resolution_parameter = 2.5e-3, dims=1:50)
+plot_cells(cds, color_cells_by = "cluster", label_cell_groups = F, cell_size = 0.3)
+```
+
+#3d
+```{r}
+cds3d<-reduce_dimension(cds, reduction_method = "UMAP", max_components = 3, num_dim = 50, verbose=T, cores=2)
+cds3d$Cluster<-clusters(cds)
+
+cds3d<-cluster_cells(cds3d, resolution = 0.4e-3, verbose = T)
+plot_cells_3d(cds3d, color_cells_by = "cluster",  cell_size = 20, color_palette = sfc(13))
+cds$cluster_3d<-clusters(cds3d)
+plot_cells(cds, color_cells_by = "cluster_3d", label_cell_groups = F, cell_size = 0.3)
+```
+
+```{r}
+cds<-iterative_LSI(cds, binarize = T, resolution =rep(1e-3,3), num_dim = 20, num_features = c(4000,3000,3000))
+cds<-reduce_dimension(cds, reduction_method = "UMAP", preprocess_method = "LSI", num_dim =20, verbose=T, cores=2, umap.min_dist = 0.3, umap.save_model = file.path(CDS_DIR, "201204_Umapmodel"))
+plot_cells(cds, color_cells_by = "cluster_3d",  label_cell_groups = F, cell_size = 0.5)+SFtheme+scale_color_manual(values=sfc(10))
+```
+
+# id clusters
+```{r}
+plot_cells(cdsi, color_cells_by = "cluster_3d", label_cell_groups = T)
+cdsi<- cluster_cells(cdsi, resolution = 0.0002)
+cdsi <- cdsi[,clusters(cdsi) != 6]
+plot_cells(cdsi, color_cells_by = "cluster", label_cell_groups = T)
+cdsi<- cluster_cells(cdsi, resolution = 0.001)
+plot_cells(cdsi, color_cells_by = "cluster", label_cell_groups = F)+scale_color_manual(values = cols)
+```
+
+```{r}
+colData(cdsi)$cluster1 <- clusters(cdsi)
+
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == 3 | colData(cdsi)$cluster1 == 4]<-3
+
+colData(cdsi)$cluster1<- as.character(colData(cdsi)$cluster1)
+```
+
+
+```{r}
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "1"]<-"Tgphex"
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "2"]<-"Tcm"
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "3"]<-"Tex_1"
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "4"]<-NULL
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "5"]<-"Gzma+_Tex"
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "6"]<-"Tpex"
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "7"]<-"Tex_cycling"
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "8"]<-"Tn"
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "9"]<-"Tem"
+colData(cdsi)$cluster1[colData(cdsi)$cluster1 == "10"]<-"Teff"
+# saveRDS(cdsi, file.path(CDS_DIR, "11232021_cdsi.RDS"))
+```
+
+#make seurat object
+```{r}
+mm2<-monocle3_to_seurat(cdsi)
+
+DimPlot(mm2, group.by= "cluster1")
+
+Idents(mm2)<-"cluster1"
+
+markers<- FindAllMarkers(mm2)
+
+write.csv(markers, file.path(RES_DIR, "seurat_cluster_top_markers.csv"))
+
+top_n<- markers %>%
+  dplyr::filter(!str_detect(gene, "^Rpl")) %>%
+  dplyr::filter(!str_detect(gene, "^Rps")) %>%
+  dplyr::filter(!str_detect(gene, "^mt-")) %>%
+  group_by(cluster) %>%
+  slice_max(n = 15, order_by = avg_log2FC)
+
+DoHeatmap(mm2, features = c("Tox", top_n$gene), group.by = "cluster1", group.colors  = cols)+scale_fill_gradientn(colors = h_cols)
+
+#saveRDS(mm2, file.path(CDS_DIR, "120621_mm2_seurat.rds"))
+```
+
+```{r Plot clusters}
+plot_cells(cdsi, color_cells_by = "cluster1", label_cell_groups = F, cell_size = 1)+scale_color_manual(values=fish_cols)+theme_void()
+```
+
+#CD38/101 populations
+```{r Sorted Subset colors}
+plot_cells(cdsi, color_cells_by = "Log_H1")
+plot_cells(cdsi, color_cells_by = "Log_H2")
+plot_cells(cdsi, color_cells_by = "Log_H3")
+
+colData(cdsi)$pop <- rep(F, length(colnames(cdsi)))
+
+colData(cdsi)$pop[which(colData(cdsi)$Log_H3 > 5)] <- "CD38+CD101+"
+
+pData(cdsi)$pop <- colData(cdsi)$pop
+
+colData(cdsi)$pop[which(colData(cdsi)$Log_H2 > 5.5)] <- "CD38+CD101-"
+
+colData(cdsi)$pop[which(colData(cdsi)$Log_H1 >4 )] <- "CD38-CD101-"
+
+table(colData(cdsi)$pop)
+
+plot_cells(cdsi[,colData(cdsi)$pop != "FALSE"], color_cells_by = "pop", label_cell_groups = F, cell_size = 0.5)+scale_color_manual(values = c(  "#e3a405","#101b63","#b869bf", "gray"))
+```
+

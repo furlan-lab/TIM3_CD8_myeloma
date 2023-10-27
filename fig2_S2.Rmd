@@ -1,7 +1,6 @@
 ---
 title: "Myeloma2_SM"
-author: "SNF"
-date: "10/07/20"
+author: "OW"
 output:
   prettydoc::html_pretty:
     theme: Cayman

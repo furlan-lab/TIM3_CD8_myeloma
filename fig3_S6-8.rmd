@@ -1,0 +1,1058 @@
+---
+title: "Mulitome Exhaustion"
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: console
+---
+
+```{r, warning=FALSE, message=FALSE, warning=FALSE, echo=F}
+graphics.off()
+rm(list=ls())
+knitr::opts_chunk$set(fig.width=8, fig.height=6,dpi=300,
+                      echo=FALSE, warning=FALSE, message=FALSE)
+setwd("/fh/fast/furlan_s/user/owalt/exhaustion/mm4")
+RES_DIR  <- file.path("res")     # SPECIFY HERE
+RMD_DIR  <- file.path("rmd")     # SPECIFY HERE
+FIG_DIR <- file.path("figs")
+
+suppressPackageStartupMessages({
+  library(monocle3)
+  library(m3addon)
+  library(reticulate)
+  library(viridis)
+  library(openxlsx)  
+  library(dplyr)
+  library(foreach)
+  library(chromVAR)
+  library(chromVARmotifs)
+  library(Matrix)
+  library(ggplot2)
+  library(xfun)
+  library(pals)
+  library(RColorBrewer)
+  library(Signac)
+  library(Seurat)
+  library(ggplot2)
+  library(future)
+  library(GenomicRanges)
+  library(EnsDb.Mmusculus.v79)
+  library(ComplexHeatmap)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+  library(JASPAR2020)
+  library(TFBSTools)
+  library(patchwork)
+  library(stringr)
+  library(ggrepel)
+  library(ggsignif)
+  library(ggpubr)
+  library(ArchR)
+  library(harmony)
+  library(viridis)
+  library(scCustomize)
+  library(SeuratDisk)
+  library(parallel)
+})
+
+set.seed(1234)
+MO <- readRDS(file.path("MO_111521.rds"))
+mm4 <- loadArchRProject()
+
+Sys.setenv(HDF5_USE_FILE_LOCKING=FALSE)
+
+use_virtualenv("/Users/owaltner/.virtualenvs/reticulate", required = T)
+py_config()
+cols<- c("#9893DA","#ebeb78","#fa9f42","#810e44","#d94745","#00B0E0","#3e5e8e","#0b6e4f","#b8e3ac")
+h_cols <-rev(brewer.pal(name = "RdYlBu", n = 7))
+
+group_cols<- c("#1E90FF","#FFA500","#708090",  "#DC143C", "#008080")
+names(group_cols)<-levels(factor(mm4$group))
+
+
+cell_type_cols<-c( "Ifng-_Tex" ="#191970","Ly6a-_Tex" = "#006400", "Tex" = "#87CEFA", "Tg_phex" = "#20B2AA","Tcm" = "#696969", "Teff" = "#9370DB", "Tem" = "#FF8C00", "Tem_2" = "#FF4500", "Tex_cycling" = "#1E90FF", "Tn" = "#ebeb78", "Tpex" ="#DC143C" )
+
+cluster_cols<-c("0" = "#20B2AA","1" = "#006400", "8" = "#87CEFA", "10" ="#191970", "5" = "#696969", "2" = "#9370DB", "4" = "#FF8C00", "9" = "#FF4500", "6" = "#1E90FF", "3" = "#ebeb78", "7" ="#DC143C" )
+
+
+dyn.load('/app/software/ArrayFire/3.8.1/lib64/libaf.so.3')
+library(RcppArrayFire)
+
+Sys.setenv(MODULEPATH="/app/modules/all", MODULEPATH_ROOT="/app/modules/all", MODULESHOME="/app/lmod/lmod")
+source("/app/lmod/lmod/init/R", echo=FALSE, max=Inf)
+module("load", "MACS2/2.2.6-foss-2019b-Python-3.7.4")
+```
+ 
+Fig 3A
+```{r Dataset Dim Plot}
+DimPlot(MO, reduction = "wnn.umap.harmony", group.by = "dataset", cols = c("midnightblue","forestgreen","maroon" ))+theme_ArchR()
+```
+
+```{r Group Dim plot}
+DimPlot(mo, reduction = "wnn.umap.harmony", group.by = "group", cols = group_cols)+theme_ArchR()
+```
+ 
+Fig 3B
+```{r Naive TEM TEX pseudotime}
+plotEmbedding(mm4, name = "group", embedding = "mo_UMAP")
+
+trajectory <- c("Naive", "TEM", "TEX")
+
+mm4 <- addTrajectory(
+    ArchRProj = mm4, 
+    name = "Exhaustion", 
+    groupBy = "group",
+    trajectory = trajectory, 
+    embedding = "mo_UMAP",
+    postFilterQuantile = 0.999,
+    force = TRUE,
+    
+)
+
+
+p <- plotTrajectory(mm4, trajectory = "Exhaustion", colorBy = "cellColData", name = "Exhaustion", embedding = "mo_UMAP")
+p[[1]]
+```
+
+Fig 3C
+```{r Naive TEM TEX pseudotime}
+p1 <- plotTrajectory(mm4, trajectory = "Exhaustion", colorBy = "GeneScoreMatrix", name = "Prf1", continuousSet = "blueYellow")
+
+p2 <- plotTrajectory(mm4, trajectory = "Exhaustion", colorBy = "GeneExpressionMatrix", name = "Prf1", continuousSet = "solarExtra")
+
+ggAlignPlots(p1[[2]], p2[[2]], type = "h")
+
+p1 <- plotTrajectory(mm4, trajectory = "Exhaustion2", colorBy = "GeneScoreMatrix", name = "Ifng", continuousSet = "blueYellow")
+
+p2 <- plotTrajectory(mm4, trajectory = "Exhaustion2", colorBy = "GeneExpressionMatrix", name = "Ifng", continuousSet = "solarExtra")
+
+ggAlignPlots(p1[[2]], p2[[2]], type = "h")
+
+p1 <- plotTrajectory(mm4, trajectory = "Exhaustion2", colorBy = "GeneScoreMatrix", name = "Gzmb", continuousSet = "blueYellow")
+
+p2 <- plotTrajectory(mm4, trajectory = "Exhaustion2", colorBy = "GeneExpressionMatrix", name = "Gzmb", continuousSet = "solarExtra")
+
+ggAlignPlots(p1[[2]], p2[[2]], type = "h")
+```
+
+Fig 3D
+```{r pos TFs experiment wide}
+seGroupMotif <- getGroupSE(ArchRProj = mm4, useMatrix = "MotifMatrix", groupBy = "group")
+seZ <- seGroupMotif[rowData(seGroupMotif)$seqnames=="z",]
+
+rowData(seZ)$maxDelta <- lapply(seq_len(ncol(seZ)), function(x){
+  rowMaxs(assay(seZ) - assay(seZ)[,x])
+}) %>% Reduce("cbind", .) %>% rowMaxs
+
+corGSM_MM <- correlateMatrices(
+  ArchRProj = rel,
+  useMatrix1 = "GeneExpressionMatrix",
+  useMatrix2 = "MotifMatrix",
+  reducedDims = "mo"
+)
+  
+corGSM_MM$maxDelta <- rowData(seZ)[match(corGSM_MM$MotifMatrix_name, rowData(seZ)$name), "maxDelta"]
+
+corGSM_MM <- corGSM_MM[order(abs(corGSM_MM$cor), decreasing = TRUE), ]
+corGSM_MM <- corGSM_MM[which(!duplicated(gsub("\\-.*","",corGSM_MM[,"MotifMatrix_name"]))), ]
+corGSM_MM$TFRegulator <- "NO"
+corGSM_MM$TFRegulator[which(corGSM_MM$cor > 0.5 & corGSM_MM$padj < 0.05 & corGSM_MM$maxDelta > quantile(corGSM_MM$maxDelta, 0.75))] <- "YES"
+sort(corGSM_MM[corGSM_MM$TFRegulator=="YES",1])
+
+df<-data.frame(corGSM_MM)
+
+write.csv(df, file.path("res/tf_motif_expression_correlation_exp_wide.csv"))
+
+df<-read.csv(file.path("res/tf_motif_expression_correlation_exp_wide.csv"))
+
+p <- ggplot(df, aes(cor, maxDelta, fill = TFRegulator)) +
+  theme_ArchR() +
+  geom_hline(yintercept = 0.9929141 , lty = "dashed", color = alpha("red", 0.5)) + 
+  geom_vline(xintercept = 0.5, lty = "dashed", color = alpha("red", 0.5)) + 
+  geom_vline(xintercept = 0) + 
+  geom_point(shape = 21, color = "black", aes(size = -log10(pval) )) + 
+  scale_fill_manual(values = c("NO"="darkgrey", "YES"="firebrick3")) +
+  xlab("Correlation To Gene Score") +
+  ylab("Max TF Motif Delta") +
+  scale_y_continuous(
+    expand = c(0,0), 
+    limits = c(0, max(df$maxDelta)*1.05)
+  )+
+  geom_label_repel(data = df[df$TFRegulator == "YES",],label = as.character(df[df$TFRegulator == "YES",]$GeneExpressionMatrix_matchName),
+                   point.padding =1,
+                   force = 3,
+                   segment.color = 'grey50',
+                   colour = "black", fill = "white", max.overlaps = Inf, size = 2.5, min.segment.length =0)+
+  xlim(c(-0.1, 1.1))
+
+
+p<-p+theme(
+         panel.background = element_rect(fill='transparent'),
+         plot.background = element_rect(fill='transparent', color=NA),
+         panel.grid.major = element_blank(),
+         panel.grid.minor = element_blank(),
+         legend.background = element_rect(fill='transparent'),
+         legend.box.background = element_rect(fill='transparent')
+       )
+pdf("figs/pos_tfs_experiment_wide.pdf", width = 4, height = 5)
+p
+dev.off()
+```
+
+Fig 3E
+```{r Gene Expression Matrix}
+plotEmbedding(mm4, name = "Tox", colorBy = "GeneExpressionMatrix", imputeWeights = getImputeWeights(mm4), quantCut = c(.05,.95))
+
+plotEmbedding(mm4, name = "Batf", colorBy = "GeneExpressionMatrix", imputeWeights = getImputeWeights(mm4), quantCut = c(.05,.95))
+
+plotEmbedding(mm4, name = "Ifng", colorBy = "GeneExpressionMatrix", imputeWeights = getImputeWeights(mm4), quantCut = c(.05,.95))
+
+plotEmbedding(mm4, name = "Ifng", colorBy = "GeneScoreMatrix", imputeWeights = getImputeWeights(mm4), quantCut = c(.05,.95))
+```
+
+Fig 3F
+```{r batf chromvar deviations}
+mtfs<-getFeatures(mm4, useMatrix = "MotifMatrix")
+mtfs[grep("Batf", mtfs)]
+
+plotEmbedding(mm4, name = "z:Batf_790", colorBy = "MotifMatrix", imputeWeights = getImputeWeights(mm4), quantCut = c(.05,.95))
+```
+
+Fig 3G
+```{r run figR to infer target genes}
+ATAC.se <- SummarizedExperiment(assays = list(counts = mo[["ATAC"]]@data) , rowRanges =mo@assays$ATAC@ranges, colData = mo@meta.data)
+
+load(file = "~/mm10_refSeq.RData")
+
+RNAmat<- mo[["RNA"]]@data%>% as.sparse()
+
+# Use 8 cores here
+cisCor <- runGenePeakcorr(ATAC.se = ATAC.se,
+                           RNAmat = RNAmat,
+                           genome = "mm10",
+                          windowPadSize = 50000,
+                           nCores = detectCores(),
+                           n_bg = 100,
+                           p.cut = NULL,
+                          geneList = c("Il10", "Tox", "Ifng"))
+
+write.csv(cisCor, file.path(RES_DIR, "tex_cisCOR_figR.csv"))
+ 
+
+cisCor<- read.csv(file.path(RES_DIR, "cisCOR_figR.csv"))
+
+# Filter associations using correlation p-value 
+cisCor.filt <- cisCor %>% dplyr::filter(pvalZ <= 0.05)
+
+dorcGenes <- dorcJplot(dorcTab = cisCor.filt,
+                       cutoff = 6,
+                       returnGeneList = TRUE)
+dorcGenes <- c(dorcGenes, "Il10", "Ifng", "Tox", "Prf1", "Eomes", "Gzmb", "Havcr2")
+
+sigGP <- cisCor[cisCor$Gene %in% dorcGenes,]
+dim(sigGP)
+
+rownames(RNAmat) <- gsub(x=rownames(RNAmat),pattern = "-",replacement = "",fixed = TRUE)
+
+dorcMat<- getDORCScores(ATAC.se, dorcTab = cisCor.filt, geneList = dorcGenes)
+
+lsi <- mo@reductions$lsi@cell.embeddings
+
+lsi <- mo@reductions$wnn.umap.harmony@cell.embeddings
+
+lsi <- lsi[which(rownames(lsi) %in% colnames(dorcMat)),]
+dorcMat <- dorcMat[,which(colnames(dorcMat) %in% rownames(lsi))]
+ATAC.se <- ATAC.se[, which(colnames(ATAC.se) %in% rownames(lsi))]
+RNAmat <- RNAmat[, which(colnames(RNAmat) %in% rownames(lsi))]
+
+lsi.knn <- FNN::get.knn(lsi,k=30)$nn.index
+rownames(lsi.knn) <- colnames(dorcMat)
+
+library(doParallel)
+dorcMat.smoothed <- smoothScoresNN(lsi.knn,dorcMat,nCores = 4)
+
+# Just so that the smoothing function will work, since it checks for matching attributes
+rownames(lsi.knn) <- colnames(RNAmat)
+
+# Run only on TFs to save time
+mouse_pwms_v3 <- readRDS("~/cisBP_mouse_pfms_2021.rds")
+rnaMat.smoothed <- smoothScoresNN(NNmat = lsi.knn,TSSmat = RNAmat,nCores = 4,geneList=intersect(rownames(RNAmat),names(mouse_pwms_v3)))
+gc()
+
+# ---------------------------------------------------------------------------------- Run FigR
+
+stim_FigR <- runFigR(ATAC.se = ATAC.se,
+                           dorcK = 30,
+                           dorcTab = sigGP,
+                           genome = "mm10", 
+                           dorcMat = dorcMat.smoothed,
+                           rnaMat = rnaMat.smoothed,
+                           n_bg = 50,
+                           nCores = 4)
+
+# Scatter plot of drivers associated with a given DORC
+plotDrivers(figR.d = stim_FigR,marker = "Pdcd1")
+plotDrivers(figR.d = stim_FigR,marker = "Ifng")
+plotDrivers(figR.d = stim_FigR,marker = "Havcr2")
+plotDrivers(figR.d = stim_FigR,marker = "Prf1" )
+dorcGenes
+```
+
+Fig S6B
+```{r Gene Expression Matrix}
+plotEmbedding(mm4, name = "Tbx21", colorBy = "GeneExpressionMatrix", imputeWeights = getImputeWeights(mm4), quantCut = c(.05,.95))
+
+plotEmbedding(mm4, name = "Il10ra", colorBy = "GeneExpressionMatrix", imputeWeights = getImputeWeights(mm4), quantCut = c(.05,.95))+theme_minimal()&NoGrid()&NoAxes()
+
+plotEmbedding(mm4, name = "Il10", colorBy = "GeneExpressionMatrix", imputeWeights = getImputeWeights(mm4), quantCut = c(.01,.9))
+
+plotEmbedding(mm4, name = "Eomes", colorBy = "GeneExpressionMatrix", imputeWeights = getImputeWeights(mm4), quantCut = c(.05,.95))+theme_minimal()&NoGrid()&NoAxes()
+
+plotEmbedding(mm4, name = "Ifng", colorBy = "GeneExpressionMatrix", imputeWeights = getImputeWeights(mm4), quantCut = c(.05,.99))
+
+plotEmbedding(mm4, name = "Ly6a", colorBy = "GeneExpressionMatrix", imputeWeights = getImputeWeights(mm4), quantCut = c(.05,.95))+theme_minimal()&NoGrid()&NoAxes()
+```
+
+Fig S6C
+```{r coverage plots}
+markerGenes  <- c("Ifng", "Il10")
+
+cols<- c("#1E90FF","#FFA500","#708090",  "#DC143C", "#008080")
+names(cols)<-levels(factor(mm4$group))
+
+p <- plotBrowserTrack(
+    ArchRProj = mm4, 
+    groupBy = "group", 
+    geneSymbol = markerGenes, 
+    loops = getPeak2GeneLinks(mm4),
+    upstream = 50000,
+    downstream = 50000,
+    pal=cols
+)
+grid::grid.newpage()
+grid::grid.draw(p$Il10)
+
+
+plotPDF(plotList = p, 
+    name = "Plot-Tracks-Marker-Genes.pdf", 
+    ArchRProj = mm4, 
+    addDOC = FALSE, width = 5, height = 5)
+```
+
+Fig S7A-B
+```{r Pseudotime Heatmaps}
+trajGSM <- getTrajectory(ArchRProj =mm4, name = "Exhaustion", useMatrix = "GeneScoreMatrix", log2Norm = TRUE, trajectoryLabel = "group" )
+
+rns<-rownames(trajGSM)[grep("Tox|Sell|Ifng|Batf|Il10|Prf1|Tcf7|Tbx21|Slamf6|Havcr2|Cx3cr1", rownames(trajGSM))]
+
+p1 <- plotTrajectoryHeatmap(trajGSM,  pal = paletteContinuous(set = "blueYellow"),  varCutOff = 0.9, colorColumns = T, columnPal = group_cols, labelMarkers = rns, labelTop = 0)
+
+trajGEM <- getTrajectory(ArchRProj = mm4, name = "Exhaustion", useMatrix = "GeneExpressionMatrix", log2Norm = T, trajectoryLabel = "group")
+
+rns<-rownames(trajGEM)[grep("Tox|Sell|Ifng|Batf|Il10|Prf1|Tcf7|Tbx21|Slamf6|Havcr2|Cx3cr1", rownames(trajGEM))]
+
+p2 <- plotTrajectoryHeatmap(trajGEM,  pal = paletteContinuous(set = "solarExtra"), grepExclude = "Rp", colorColumns = T, columnPal = group_cols, labelMarkers = rns, labelTop=0)
+
+trajMM <- getTrajectory(ArchRProj = mm4, name = "Exhaustion", useMatrix = "MotifMatrix", log2Norm = F, trajectoryLabel = "group" )
+
+rns<-rownames(trajMM)[grep("Nr4a2|Sell|Batf|Bach2|Eomes|Tcf7|Tbx21|Jun|Irf2|Nfatc1|Stat4|Foxo1", rownames(trajMM))]
+rns<-rns[grep("z:", rns)]
+
+p3 <- plotTrajectoryHeatmap(trajMM,  pal = paletteContinuous(set = "whitePurple"), varCutOff = 0.5, colorColumns = T, columnPal = group_cols, labelMarkers = rns, labelTop=0)
+
+
+plotPDF(p1, p2,p3, name = "Plot-Exhaustion-Traj-Heatmaps.pdf", ArchRProj = mm4, addDOC = FALSE, width = 5, height = 7)
+```
+
+Fig 3H
+```{r relapse only object colored by cell cluster}
+setwd("/fh/fast/furlan_s/user/owalt/exhaustion/relapse")
+RES_DIR  <- file.path("res")     # SPECIFY HERE
+RMD_DIR  <- file.path("rmd")     # SPECIFY HERE
+FIG_DIR <- file.path("figs")
+rel<- loadArchRProject("/fh/fast/furlan_s/user/owalt/exhaustion/relapse")
+seu<-readRDS(file = "/fh/fast/furlan_s/user/owalt/exhaustion/relapse/relapse_seurat.rds")
+
+DimPlot(seu, group.by = "cell_type", cols = cell_type_cols, pt.size = 0.7, order=T)&NoAxes()
+```
+
+Fig 3I
+```{r prepare bulk atac}
+files<-list.files("../extdata/solid_tumor/GSE89308_RAW")
+dirs<-paste0("../extdata/solid_tumor/GSE89308_RAW/", files)
+
+meta<-read.delim("../extdata/solid_tumor/bulk_meta.txt", sep = ",")
+
+counts<-lapply(dirs, function(x){
+  cts<-read.table(x, header = T, fill = T)
+  cts$peaks<-paste0(cts[,1], ":", cts[,2], "-", cts[,3])
+  cts
+})
+
+x<-counts[[1]]
+cts<-lapply(counts, function(x){
+  x[,7]
+})
+
+mat<-do.call(cbind, cts)
+
+mat[is.na(mat)]<-0
+
+cols<-str_split(files, "_ATAC_") %>% sapply("[[",1) 
+
+colnames(mat)<-cols
+rownames(mat)<-counts[[1]]$peaks
+
+gr<-counts[[1]]$peaks %>% StringToGRanges(sep = c(":", "-"))
+
+rowData<-data.frame(row.names = counts[[1]]$peaks, annoataion = counts[[1]]$peak_annotation, symbol = counts[[1]]$symbol)
+
+gr@metadata<-rowData
+
+meta<-meta[order(match(meta$GEO_Accession..exp., colnames(mat))),]
+rownames(meta)<-meta$GEO_Accession..exp.
+
+se<-SummarizedExperiment(assays = list(counts = mat), rowRanges = gr, colData = meta )
+
+se<-se[,se$Organism == "Mus musculus"]
+```
+
+```{r project bulk atac on ATAC UMAP}
+proj<-projectBulkATAC(
+  ArchRProj = rel,
+  seATAC =se,
+  reducedDims = "ATAC_LSI",
+  embedding = "UMAP",
+  n = 250,
+  verbose = TRUE,
+  threads = detectCores(),
+  force =T,
+  logFile = createLogFile("projectBulkATAC")
+)
+
+umap_df<-rbind(proj$simulatedBulkUMAP, proj$singleCellUMAP)%>% data.frame()
+
+umap_df$Type<-factor(umap_df$Type, levels = rev(levels(factor(umap_df$Type))))
+```
+
+```{r metadata munging}
+#cell type
+meta$cell_type<-NA
+meta$cell_type[grep("Naïve",meta$source_name)]<-"naive"
+meta$cell_type[grep("naïve",meta$source_name)]<-"naive"
+meta$cell_type[grep("effector",meta$source_name)]<-"effector"
+meta$cell_type[grep("memory",meta$source_name)]<-"memory"
+meta$cell_type[grep("central memory",meta$source_name)]<-"central memory"
+meta$cell_type[grep("Central Memory",meta$source_name)]<-"central memory"
+meta$cell_type[grep("Effector Memory",meta$source_name)]<-"effector memory"
+meta$cell_type[grep("PD1hi",meta$source_name)]<-"PD1hi CD8"
+meta$cell_type[is.na(meta$cell_type)]<-"CD8 T cells"
+
+#disease+cell type
+meta$disease_cell<-paste0(meta$disease_state, "_", meta$cell_type)
+```
+
+```{r plot listeria samples}
+umap_df$cell_type<-NA
+umap_df$disease_cell<-NA
+umap_df$cd8_status<-NA
+#loop through umap_df and match metadata
+for(i in which(umap_df$Type %in% meta$GEO_Accession..exp.)){
+  umap_df$cell_type[i]<-meta[meta$GEO_Accession..exp. == umap_df$Type[i],]$cell_type
+  umap_df$disease_cell[i]<-meta[meta$GEO_Accession..exp. == umap_df$Type[i],]$disease_cell
+  umap_df$cd8_status[i]<-meta[meta$GEO_Accession..exp. == umap_df$Type[i],]$cd8_t_cell_status
+}
+
+sub_df<-umap_df[!grepl("Listeria",umap_df$disease_cell), ]
+
+p<-ggplot(sub_df[order(sub_df$Type),], aes(x= UMAP1, y =UMAP2, color =disease_cell))+geom_point()+scale_color_manual(values = c("cornflowerblue", "#fa9425"), na.value = "gray80")+theme_classic()+NoAxes()
+
+p
+```
+
+```{r project / co-embed lcmv atac}
+lcmv<-readRDS("../extdata/scATACseq_longitudinal_LCMV_Arm_Cl13.Rds")
+
+cl<-lcmv[,lcmv$sampleID %in% c("Cl13_d15", "Cl13_d30")]
+
+se<-SummarizedExperiment(assays=list(counts = cl@assays$peaks@counts), rowRanges = cl@assays$peaks@ranges, colData = cl@meta.data)
+
+proj<-projectBulkATAC(
+  ArchRProj = rel,
+  seATAC =se,
+  reducedDims = "ATAC_LSI",
+  embedding = "ATAC_UMAP",
+  n = 1,
+  verbose = TRUE,
+  threads = detectCores(),
+  force =T,
+  logFile = createLogFile("projectBulkATAC")
+)
+
+saveRDS(proj, "res/lcmv_projection_relapse.rds")
+
+proj<-readRDS("../relapse/res/lcmv_projection_relapse.rds")
+
+umap_df<-rbind(proj$simulatedBulkUMAP, proj$singleCellUMAP)%>% data.frame()
+
+meta<-se@colData
+meta$sampleID
+meta$ClusterNames
+
+umap_df$sampleID<-NA
+umap_df$ClusterNames<-NA
+
+for(i in which(umap_df$Type %in% rownames(meta))){
+  umap_df$sampleID[i]<-meta[rownames(meta) == umap_df$Type[i],]$sampleID
+  umap_df$ClusterNames[i]<-meta[rownames(meta) == umap_df$Type[i],]$ClusterNames
+}
+
+lcmv_cols<-sfc(20)
+names(lcmv_cols)<-levels(factor(lcmv$ClusterNames))
+
+umap_df$Type<-factor(umap_df$Type, levels = rev(levels(factor(umap_df$Type))))
+x<-"CTL"
+for(x in levels(factor(umap_df$ClusterNames))){
+  sub<-umap_df[umap_df$ClusterNames == x | is.na(umap_df$ClusterNames) ,]
+  pdf(paste0("figs/lcmv_projection/", x, "_projection.pdf"), width = 5, height = 4)
+  print(ggplot(sub[order(sub$Type),], aes(x= UMAP1, y =UMAP2, color = ClusterNames))+geom_point(size=1)+scale_color_manual(values = lcmv_cols, na.value = "gray80")+theme_classic()+NoAxes())
+  dev.off()
+}
+
+p<-ggplot(umap_df[order(umap_df$Type),], aes(x= UMAP1, y =UMAP2, color = ClusterNames))+geom_point(size=1)+scale_color_manual(values = lcmv_cols, na.value = "gray80")+theme_classic()+NoAxes()
+
+rel$cluster<-as.character(rel$cluster)
+
+df<-rel@cellColData
+df<-cbind(df, rel@embeddings$UMAP@listData$df)
+names(df)
+df<-df %>%as.data.frame()
+names(df)<-c(names(df)[1:26], "UMAP_1", "UMAP_2")
+
+q<-ggplot(df, aes(x =UMAP_1, y = UMAP_2, color = cluster))+geom_point()+scale_color_manual(values = cluster_cols)+theme_classic()+NoAxes()
+
+pdf("figs/lcmv_projection_ATAC.pdf", width =12 , height =5)
+p+q
+dev.off()
+```
+
+Fig 3J
+```{bash run multivelo}
+####DOWNLOAD VELOCYTO#####
+ml Python/3.8.6-GCCcore-10.2.0
+ml Anaconda3
+ml SAMtools
+
+source activate scenicplus
+####VELOCYTO#####
+
+export id=MM3_2                                  ##edit this
+samps=(MM3_2)  ##edit this
+
+export wd="/fh/fast/hill_g/10X/myeloma3/MM3_2/outs"
+
+cd $wd
+for sample in ${samps[@]}; do
+export sample=$sample
+sbatch -n 1 -c 22 -p campus-new -M gizmo --mem-per-cpu=21000MB --wrap='velocyto run -vv -b ${wd}/filtered_feature_bc_matrix/barcodes.tsv.gz -m /fh/fast/furlan_s/grp/refs/GRCm38/gencode_M24.gtf -o /fh/fast/furlan_s/user/owalt/exhaustion/relapse/velocyto \
+-@ 22 ${wd}/gex_possorted_bam.bam /shared/biodata/ngs/Reference/10X/refdata-gex-mm10-2020-A/genes/genes.gtf'
+done
+```
+
+```{bash make virtual environment for mulitvelo}
+ml Python/3.9.6-GCCcore-11.2.0
+
+python3 -m venv ~/mypython
+
+source ~/mypython/bin/activate
+
+which pip
+ 
+python -m pip install multivelo
+python -m pip install numpy==1.21.2
+python -m pip install typing-extensions==4.3.0
+
+source ~/mypython/bin/activate
+~/mypython/bin/python
+```
+
+```{bash run multivelo}
+source ~/mypython/bin/activate
+~/mypython/bin/python
+
+import os
+import scipy
+import numpy as np
+import pandas as pd
+import scanpy as sc
+import scvelo as scv
+import multivelo as mv
+import matplotlib.pyplot as plt
+```
+
+```{python}
+scv.settings.verbosity = 3
+scv.settings.presenter_view = False
+scv.set_figure_params('scvelo')
+pd.set_option('display.max_columns', 100)
+pd.set_option('display.max_rows', 200)
+np.set_printoptions(suppress=True)
+```
+
+```{r make RNA scanpy}
+DefaultAssay(seu)<-"GeneExpressionMatrix"
+col_data<-rel@cellColData %>% as.data.frame()
+rownames(col_data)<-gsub("MM3_2#", "", rownames(col_data))
+exprs<-t(seu@assays$GeneExpressionMatrix@counts)
+rownames(exprs)<-gsub("MM3_2#", "", rownames(exprs))
+embedding<-seu@reductions$mo_UMAP@cell.embeddings
+```
+
+```{r make gene score scanpy}
+atac_seu<-viewmaster::archR_to_seurat(rel, matrix = "GeneScoreMatrix", binarize = F, archr_rd = "mo_UMAP")
+a_exprs<-atac_seu@assays$GeneScoreMatrix@counts %>% t()
+rownames(a_exprs)<-gsub("MM3_2#", "", rownames(a_exprs))
+
+same_genes<-intersect(colnames(a_exprs), colnames(exprs))
+a_exprs<-a_exprs[,same_genes]
+exprs<-exprs[,same_genes]
+
+row_data<-data.frame(row.names = same_genes, gene_id = same_genes)
+```
+
+```{python}
+adata_sce = sc.AnnData(X = r.exprs, obs = r.col_data, var = r.row_data)
+adata_sce.obsm['umap'] = r.embedding
+adata_sce.obs.columns
+sc.pl.umap(adata_sce, color='cell_type')
+
+adata_rna = scv.read("velocyto/gex_possorted_bam_ZUUVE.loom", cache=True )
+adata_rna.obs_names = [x.split(':')[1][:-1] + '-1' for x in adata_rna.obs_names]
+adata_rna.var_names_make_unique()
+
+adata_rna = scv.utils.merge(adata_sce, adata_rna)
+scv.pp.filter_and_normalize(adata_rna)
+
+scv.pp.normalize_per_cell(adata_rna)
+scv.pp.log1p(adata_rna)
+scv.pp.moments(adata_rna, n_pcs=30, n_neighbors=50)
+
+sc.pl.umap(adata_rna, color='cell_type')
+sc.pl.umap(adata_atac, color='cell_type')
+```
+
+```{r export nn data}
+lsi<-rel@reducedDims$mo$matRD
+nn_cells<-rownames(lsi) %>% gsub("MM3_2#", "", .)
+rownames(lsi)<-NULL
+colnames(lsi)<-NULL
+
+lsi.knn <- FNN::get.knn(lsi,k=30)$nn.index
+
+# save neighborhood graph
+write.table(lsi.knn, "nn_idx.txt", sep = ',', row.names = F, col.names = F, quote = F)
+write.table(lsi, "nn_dist.txt", sep = ',', row.names = F, col.names = F, quote = F)
+write.table(nn_cells, "nn_cells.txt", sep = ',', row.names = F, col.names = F, quote = F)
+
+Sys.setenv(PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION="python")
+```
+
+```{python create anndata objects}
+adata_atac = sc.AnnData(X = r.a_exprs, obs = r.col_data, var = r.row_data)
+adata_atac.obsm['umap'] = r.embedding
+adata_atac.obs.columns
+sc.pl.umap(adata_atac, color='cell_type')
+
+scv.pp.normalize_per_cell(adata_atac)
+scv.pp.log1p(adata_atac)
+scv.pp.moments(adata_atac, n_pcs=30, n_neighbors=50)
+```
+
+```{python}
+# Read in Seurat WNN neighbors.
+nn_idx = np.loadtxt("nn_idx.txt", delimiter=',')
+nn_dist = np.loadtxt("nn_dist.txt", delimiter=',')
+nn_cells = pd.Index(pd.read_csv("nn_cells.txt", header=None)[0])
+
+# Make sure cell names match.
+np.all(nn_cells == adata_atac.obs_names)
+
+mv.knn_smooth_chrom(adata_atac, nn_idx, nn_dist)
+
+shared_cells = pd.Index(np.intersect1d(adata_rna.obs_names, adata_atac.obs_names))
+
+adata_atac = adata_atac[shared_cells,:]
+adata_rna = adata_rna[shared_cells,:]
+
+np.all(adata_rna.obs_names == adata_atac.obs_names)
+
+adata_atac.obsm['umap1'] = adata_atac.obsm['umap']
+adata_rna.obsm['umap1'] = adata_rna.obsm['umap']
+
+scv.tl.umap(adata_rna)
+scv.tl.umap(adata_atac)
+
+sc.pl.umap(adata_atac, color='cell_type')
+sc.pl.umap(adata_rna, color='cell_type')
+
+adata_rna.write("adata_rna.h5ad")
+adata_atac.write("adata_atac.h5ad")
+```
+
+```{bash}
+ml Python/3.8.6-GCCcore-10.2.0
+ml Anaconda3
+
+grabnode
+440
+22
+2
+y
+
+source activate scenicplus
+
+/home/owaltner/.conda/envs/scenicplus/bin/python3 
+
+import os
+import scipy
+import numpy as np
+import pandas as pd
+import scanpy as sc
+import scvelo as scv
+import multivelo as mv
+import matplotlib.pyplot as plt
+
+os.chdir('/fh/fast/furlan_s/user/owalt/exhaustion/relapse')
+
+adata_rna = sc.read_h5ad("adata_rna.h5ad")
+adata_atac = sc.read_h5ad("adata_atac.h5ad")
+
+adata_result = mv.recover_dynamics_chrom(adata_rna,
+                                         adata_atac,
+                                         max_iter=5,
+                                         init_mode="invert",
+                                         verbose=False,
+                                         parallel=True,
+                                         save_plot=False,
+                                         rna_only=False,
+                                         n_jobs = 22,
+                                         fit=True,
+                                         n_anchors=500,
+                                         extra_color_key='cell_type'
+                                        )
+# Save the result for use later on
+adata_result.write("multivelo_result.h5ad")
+```
+
+```{python}
+import os
+import scipy
+import numpy as np
+import pandas as pd
+import pytz
+import scanpy as sc
+
+import scvelo as scv
+import multivelo as mv
+import matplotlib
+import matplotlib.pyplot as plt
+
+
+os.chdir('/fh/fast/furlan_s/user/owalt/exhaustion/relapse')
+adata_result = sc.read_h5ad("multivelo_result.h5ad")
+adata_rna = sc.read_h5ad("adata_rna.h5ad")
+mv.pie_summary(adata_result)
+plt.show()
+mv.likelihood_plot(adata_result)
+plt.show()
+
+mv.velocity_graph(adata_result)
+mv.latent_time(adata_result)
+
+adata_result.obsm['umap1'] = adata_rna.obsm['umap']
+
+cell_type_cols=["#191970","#006400", "#87CEFA", "#20B2AA", "#696969", "#9370DB", "#FF8C00", "#FF4500", "#1E90FF", "#ebeb78", "#DC143C"]
+
+mv.velocity_embedding_stream(adata_result, basis='umap1', color='cell_type',palette = cell_type_cols, arrow_style = '-|>', arrow_size = 2)
+plt.savefig('figs/relapse_mo_velocity.pdf', dpi = 700)
+
+scv.pl.scatter(adata_result, color='latent_time', color_map='gnuplot', size=80, basis='umap1')
+```
+
+```{r plot latent time and heatmap }
+df<-py$adata_result$obs
+latent_time<-df$latent_time
+names(latent_time)<-paste0("MM3_2#", rownames(df))
+
+latent_time<-latent_time[order(match(names(latent_time), rownames(rel@cellColData)))]
+
+latent<-rep(0, length(rownames(rel@cellColData)))
+names(latent)<-rownames(rel@cellColData)
+latent[names(latent) %in% names(latent_time)]<-latent_time
+
+rel$latent_time<-latent
+
+seu$latent_time<-latent
+FeaturePlot_scCustom(seu, features = "latent_time", pt.size = 0.7)+scale_color_gradientn(colors = paletteContinuous(set = "fireworks2"))&NoAxes()
+
+DefaultAssay(seu)<-"Motif"
+seu<-FindVariableFeatures(seu)
+VariableFeatures(seu)
+
+abs(rowMeans(seu@assays$Motif@counts)) %>% quantile
+rowVars(seu@assays$Motif@counts) %>% quantile
+
+mat<-seu@assays$Motif@counts[rowVars(seu@assays$Motif@counts) > 3,]
+
+window <- 10
+step <- 5
+
+mat<-mat[,order(seu$latent_time)]
+mat<-t(scale(t(mat)))
+
+mat<-mat[order(apply(t(rollapply(t(mat), width=window, by=step, FUN=mean)), 1, which.max)),]
+
+col_fun = circlize::colorRamp2(c(-1, -0.5, 0, 0.5, 1), c("white", mako(4) %>% rev()))
+
+ann<-seu$latent_time[order(seu$latent_time)]
+
+col_anno = colorRamp2(c(0,0.25,0.5, 0.75, 1), paletteContinuous(set = "fireworks2", n =5))
+ca<-HeatmapAnnotation(df = data.frame(row.names = colnames(mat), latent= ann), col = list(latent = col_anno), border = T)
+
+Heatmap(mat, cluster_columns = F, show_column_names = F, show_row_dend = F,use_raster = TRUE, raster_by_magick = TRUE, cluster_rows = F, col = col_fun, clustering_distance_rows = "euclidean", show_column_dend = F, raster_magick_filter = "Quadratic", raster_quality = 200,top_annotation = ca, border = T )
+```
+
+Fig 3K
+```{r pairwise -  C0 v C10}
+rel$cluster<-as.character(rel$cluster)
+markerTest <- getMarkerFeatures(
+  ArchRProj = rel, 
+  useMatrix = "PeakMatrix",
+  groupBy = "cluster",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "0",
+  bgdGroups = c("10")
+)
+
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = rel,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.2"
+  )
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = rel,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC <= -0.2"
+  )
+
+#get motifs enriched in shFLI group and rank them by mlog10Padj
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df_1 <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df_1$rank <- rev(seq_len(nrow(df_1)))
+df_1$group<-"0"
+
+#get motifs enriched in shNS group and rank them by mlog10Padj
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- rev(seq_len(nrow(df)))
+df$group<-"10"
+df$rank<- -df$rank
+
+#combine them together to get TF motif data on both groups
+agg<-rbind(df_1, df)
+
+
+gg <- ggplot(agg, aes(rank, mlog10Padj, fill = ifelse(mlog10Padj > 2, group, NA))) + 
+  geom_point(aes(size =  mlog10Padj), color = "gray20", shape = 21) +
+  geom_vline(xintercept = 0)+
+  ggrepel::geom_label_repel(
+        data = agg[(agg$mlog10Padj >5 & agg$rank > 100) |(agg$mlog10Padj >5 & agg$rank < -100) ,], aes(x = rank, y = mlog10Padj, label = TF),
+        size = 2,
+        nudge_x = 11,
+        color = "black",
+        fill = "white",
+        nudge_y = 10, max.overlaps = 100
+  )+theme_ArchR(legendPosition = "right")+ 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("TF Ranked by Enrichment") +
+  scale_color_gradientn(colors = c("gray90", "gray10"))+ggtitle(label=paste0("C0 v C10"))+scale_fill_manual(values =c(cluster_cols),na.value = "black") 
+
+gg
+
+pdf("figs/DA_motifs_0_10.pdf",  width = 6, height =4)
+gg
+dev.off()
+```
+
+```{r pairwise -  C0 v C1}
+markerTest <- getMarkerFeatures(
+  ArchRProj = rel, 
+  useMatrix = "PeakMatrix",
+  groupBy = "cluster",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "0",
+  bgdGroups = c("1")
+)
+
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = rel,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.2"
+  )
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = rel,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC <= -0.2"
+  )
+
+#get motifs enriched in shFLI group and rank them by mlog10Padj
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df_1 <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df_1$rank <- rev(seq_len(nrow(df_1)))
+df_1$group<-"0"
+
+#get motifs enriched in shNS group and rank them by mlog10Padj
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- rev(seq_len(nrow(df)))
+df$group<-"1"
+df$rank<- -df$rank
+
+#combine them together to get TF motif data on both groups
+agg<-rbind(df_1, df)
+
+gg <- ggplot(agg, aes(rank, mlog10Padj, fill = ifelse(mlog10Padj > 1, group, NA))) + 
+  geom_point(aes(size =  mlog10Padj), color = "gray20", shape = 21) +
+  geom_vline(xintercept = 0)+
+  ggrepel::geom_label_repel(
+        data = agg[(agg$mlog10Padj >100 & agg$rank > 100) |(agg$mlog10Padj >2 & agg$rank < -100) ,], aes(x = rank, y = mlog10Padj, label = TF),
+        size = 2,
+        nudge_x = 11,
+        color = "black",
+        fill = "white",
+        nudge_y = 25, max.overlaps = 20
+  )+theme_ArchR(legendPosition = "right")+ 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("TF Ranked by Enrichment") +
+  scale_color_gradientn(colors = c("gray90", "gray10"))+ggtitle(label=paste0("C0 v C1"))+scale_fill_manual(values =c(cluster_cols),na.value = "black") 
+
+gg
+
+pdf("figs/DA_motifs_C0_C1.pdf",  width = 6, height =4)
+gg
+dev.off()
+```
+
+```{r pairwise -  C0 v C8}
+markerTest <- getMarkerFeatures(
+  ArchRProj = rel, 
+  useMatrix = "PeakMatrix",
+  groupBy = "cluster",
+  testMethod = "wilcoxon",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "0",
+  bgdGroups = c("8")
+)
+
+motifsUp <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = rel,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC >= 0.2"
+  )
+
+motifsDo <- peakAnnoEnrichment(
+    seMarker = markerTest,
+    ArchRProj = rel,
+    peakAnnotation = "Motif",
+    cutOff = "FDR <= 0.1 & Log2FC <= -0.2"
+  )
+
+#get motifs enriched in shFLI group and rank them by mlog10Padj
+df <- data.frame(TF = rownames(motifsUp), mlog10Padj = assay(motifsUp)[,1])
+df_1 <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df_1$rank <- rev(seq_len(nrow(df_1)))
+df_1$group<-"0"
+
+#get motifs enriched in shNS group and rank them by mlog10Padj
+df <- data.frame(TF = rownames(motifsDo), mlog10Padj = assay(motifsDo)[,1])
+df <- df[order(df$mlog10Padj, decreasing = TRUE),]
+df$rank <- rev(seq_len(nrow(df)))
+df$group<-"8"
+df$rank<- -df$rank
+
+#combine them together to get TF motif data on both groups
+agg<-rbind(df_1, df)
+
+gg <- ggplot(agg, aes(rank, mlog10Padj, fill = ifelse(mlog10Padj > 1, group, NA))) + 
+  geom_point(aes(size =  mlog10Padj), color = "gray20", shape = 21) +
+  geom_vline(xintercept = 0)+
+  ggrepel::geom_label_repel(
+        data = agg[(agg$mlog10Padj >75& agg$rank > 100) |(agg$mlog10Padj >3 & agg$rank < -100) ,], aes(x = rank, y = mlog10Padj, label = TF),
+        size = 2,
+        nudge_x = 11,
+        color = "black",
+        fill = "white",
+        nudge_y = 25, max.overlaps = 100
+  )+theme_ArchR(legendPosition = "right")+ 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("TF Ranked by Enrichment") +
+  scale_color_gradientn(colors = c("gray90", "gray10"))+ggtitle(label=paste0("0 v 8"))+scale_fill_manual(values =c(cluster_cols),na.value = "black") 
+
+gg
+
+pdf("figs/DA_motifs_0_8.pdf",  width = 6, height =4)
+gg
+dev.off()
+```
+
+Fig S8A
+```{r annotate clusters/find overlaps with fish dataset}
+cdsi<-readRDS("../mm2/cds/11232021_cdsi.RDS")
+
+rel_cds<-seurat_to_monocle3(seu, assay_name = "GeneExpressionMatrix", seu_rd = "mo_UMAP")
+
+vg<-common_variant_genes(rel_cds, cdsi, top_n = 5000)
+
+cds<-viewmastR(ref_cds = cdsi, query_cds = rel_cds, ref_celldata_col = "cluster1",selected_genes = vg, verbose=T, FUNC = "softmax_regression", tf_idf = F, learning_rate = 1.5)
+plot_cells(cds, color_cells_by = "smr_celltype", cell_size = 1)
+
+seu$smr_celltype<-cds$smr_celltype
+
+tab<-table(seu$cluster, seu$smr_celltype) %>% as.matrix()
+tab<-sweep(tab, 2, colSums(tab), '/')
+
+pdf("figs/fish_relapse_mo_cluster_correlation_heatmap.pdf", width = 6, height =6)
+pheatmap::pheatmap(tab, cluster_rows = T, cluster_cols=T, color = viridis(10), display_numbers = F, clustering_distance_rows = "maximum", clustering_distance_cols = "maximum")
+dev.off()
+```
+
+Fig S8B
+```{r}
+maf_markers<-read.csv("../mm2/res/tgphex_markers.csv")
+maf_sig<-maf_markers %>% dplyr::filter(-log10(p_val_adj) > 50 & abs(avg_log2FC) > 0.2) %>% dplyr::select(gene) %>% dplyr::filter(!grepl("^Rp", gene)) %>% dplyr::filter(!grepl("^mt", gene))
+
+seu<-AddModuleScore(seu, name= "tgphex_signature", features = list(maf_sig$gene))
+
+pdf("figs/tgphex_signature_vln.pdf", width =4, height = 4)
+VlnPlot(seu, features = "tgphex_signature1", group.by = "cluster", cols = cluster_cols, pt.size = 0)&NoLegend()
+dev.off()
+```
+
+Fig S8C
+```{r}
+features = c("Havcr2", "Cx3cr1", "Gzmb", "Ly6a", "Cd28", "Gzma", "Ifng", "Prf1", "Batf", "Il10", "Tox")
+
+pdf("figs/tgphex_marker_genes_dot_plot_relapse_mo.pdf", width =6, height =4)
+DotPlot(seu, features= features, assay = "GeneExpressionMatrix", group.by = "cell_type", cluster.idents = F)+scale_color_gradientn(colors = rna_cols)+RotatedAxis()+coord_flip()
+dev.off()
+```
+

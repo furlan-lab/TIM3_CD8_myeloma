@@ -1,0 +1,323 @@
+---
+title: "cdsi Load"
+author: OW_SSB
+output: html_myeebook
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r, warning=FALSE, message=FALSE, warning=FALSE, echo=F}
+rm(list=ls())
+ROOT_DIR<-"/fh/fast/furlan_s/user/owalt/exhaustion/cart_sm"
+setwd(ROOT_DIR)
+DATA_DIR <- file.path(ROOT_DIR, "data")      # SPECIFY HERE
+RES_DIR  <- file.path(ROOT_DIR,  "res")     # SPECIFY HERE
+RMD_DIR  <- file.path(ROOT_DIR,  "rmd")     # SPECIFY HERE
+CDS_DIR <- file.path(ROOT_DIR,   "cds")
+FIG_DIR <- file.path(ROOT_DIR,  "figs")
+
+suppressPackageStartupMessages({
+  library(monocle3)
+  library(m3addon)
+  library(dplyr)
+  library(Matrix)
+  library(reticulate)
+  library(ggplot2)
+  library(pals)
+  library(RColorBrewer)
+  library(Seurat)
+  library(ComplexHeatmap)
+  library(ArchR)
+  library(Biobase)
+  library(stringr)
+  library(viridis)
+  library(Seurat)
+  library(parallel)
+  library(scCustomize)
+  library(scRepertoire)
+  library(evmix)
+  library(forcats)
+  library(ggalluvial)
+  library(future)
+  library(pbmcapply)
+  library(parallel)
+  library(dplyr)
+  library(msigdbr)
+  library(fgsea)
+  library(stringr)
+  library(harmony)
+  library(future)
+  library(ggplot2)
+  library(circlize)
+  library(scales)
+})
+
+set.seed(1234)
+
+dyn.load('/app/software/ArrayFire/3.8.1/lib64/libaf.so.3')
+library(RcppArrayFire)
+library(viewmaster)
+```
+
+# Load object
+```{r}
+seu<-readRDS(file.path(CDS_DIR, "cart_sm_seurat.rds"))
+```
+
+# load colors
+```{r, load colors and object}
+seu$cell_type<-factor(seu$cell_type, levels = c("Tpex", "IFN responsive Tex","NK-like CAR-T cells","Tex",  "Tfex", "Cycling Tex" ))
+clus_cols<-c("NK-like CAR-T cells" = "#710162","IFN responsive Tex" = "#fbbf45", "Tfex" = "#03c383","Cycling Tex" = "#3B9AB2","Tpex" = "#ed0345","Tex" = "#017351" )
+rna_cols<-paletteContinuous(n=8)[c(1:3, 6:8)]
+```
+
+# Make Object
+```{r load data make assays}
+# Load the PBMC dataset
+seul <- Read10X_h5(file.path(DATA_DIR, "SM_4", "outs/filtered_feature_bc_matrix.h5"))
+# Initialize the Seurat object with the raw (non-normalized data).
+seu <- CreateSeuratObject(counts = seul$`Gene Expression`, project = "carT", min.cells = 3, min.features = 200)
+mat<-seul$`Antibody Capture`
+rownames(mat)
+# Note that since measurements were made in the same cells, the two matrices have identical
+# column names
+all.equal(colnames(seu), colnames(mat))
+adt_mat<-mat[!grepl("^HT",rownames(mat)),which(colnames(mat) %in% colnames(seu))]
+
+dim(seu)
+dim(adt_mat)
+rownames(adt_mat)
+adt<-CreateAssayObject(counts = adt_mat)
+seu[["ADT"]]<-adt
+```
+
+```{r subset RNA}
+# The [[ operator can add columns to object metadata. This is a great place to stash QC stats
+DefaultAssay(seu)<-"RNA"
+seu$percent.mt <- PercentageFeatureSet(seu, pattern = "^mt-")
+seu$log_RNA<-log10(seu$nCount_RNA)
+# Visualize QC metrics as a violin plot
+VlnPlot(seu, features = c("log_RNA"), pt.size = 0)
+VlnPlot(seu, "percent.mt")+ylim(c(0,15))
+seu <- subset(seu, subset = log_RNA > 3.25 & log_RNA < 4.25 & percent.mt < 5)
+
+hto_mat<-mat[grep("^HT",rownames(mat))[1:3],which(colnames(mat) %in% colnames(seu))]
+#only HTO 1-3 were used for this experiment
+hto<-CreateAssayObject(counts = hto_mat)
+seu[["HTO"]]<-hto
+```
+
+```{r normalize -- demultiplex HTOs}
+DefaultAssay(seu) <- "RNA"
+# Normalize RNA data with log normalization
+seu <- NormalizeData(seu)
+# Find and scale variable features
+seu <- FindVariableFeatures(seu, selection.method = "mean.var.plot")
+seu <- ScaleData(seu, features = VariableFeatures(seu))
+
+# Normalize HTO data, here we use centered log-ratio (CLR) transformation
+DefaultAssay(seu) <- "HTO"
+seu <- NormalizeData(seu, assay = "HTO", normalization.method = "CLR")
+
+seu<-ScaleData(seu, assay = "HTO")
+# If you have a very large dataset we suggest using k_function = 'clara'. This is a k-medoid
+# clustering function for large applications You can also play with additional parameters (see
+# documentation for HTODemux()) to adjust the threshold for classification Here we are using
+# the default settings
+VlnPlot(seu, features = c("nCount_ADT", "nCount_HTO"), pt.size = 0, log = T)
+seu <- HTODemux(seu, assay = "HTO", positive.quantile = 0.99)
+VlnPlot(seu, features  = rownames(seu@assays$HTO), log = T)
+# Global classification results
+table(seu$HTO_classification.global)
+
+Idents(seu) <- "HTO_classification.global"
+VlnPlot(seu, features = "log_RNA", pt.size = 0.1, log = TRUE)
+
+# Extract the singlets
+seu <- subset(seu, idents = "Singlet")
+```
+
+```{r reduce dimensions}
+# Note that all operations below are performed on the RNA assay Set and verify that the
+# default assay is RNA
+DefaultAssay(seu) <- "RNA"
+# perform visualization and clustering steps
+
+seu <- SCTransform(seu, vars.to.regress = "percent.mt", verbose = FALSE)
+# These are now standard steps in the Seurat workflow for visualization and clustering
+seu <- RunPCA(seu, verbose = FALSE)
+ElbowPlot(seu)
+seu <- RunUMAP(seu, dims = 1:20, verbose = FALSE)
+seu <- FindNeighbors(seu, dims = 1:20, verbose = FALSE)
+seu <- FindClusters(seu, verbose = FALSE)
+DimPlot(seu, label = TRUE, group.by = "seurat_clusters") + NoLegend()
+```
+
+```{r normalize ADT}
+# Note that the following command is an alternative but returns the same result
+seu <- NormalizeData(seu, normalization.method = "CLR", margin = 2, assay = "ADT")
+```
+
+```{r initial marker genes}
+DefaultAssay(seu)<-"SCT"
+FeaturePlot_scCustom(seu, features = c("Cd3e" , "Cd4", "Cd8a", "Foxp3", "Lef1", "Havcr2", "Mki67", "Ptprc"), colors_use = rna_cols)
+
+FeaturePlot_scCustom(seu, features = c("HT1", "HT2", "HT3"), colors_use = paletteContinuous("whitePurple"))
+FeaturePlot_scCustom(seu, features = c("adt_CD8", "adt_CD4", "adt_CD45-1"), colors_use = paletteContinuous("whitePurple"))
+VlnPlot(seu, features =  c("adt_CD8"), log =T, group.by = "seurat_clusters")
+##no surprise that CD4 and CD45.1 didnt stain well, got 98% yield of CD8 donor CAR-Ts 
+```
+
+```{r get CD8s}
+DefaultAssay(seu)<-"RNA"
+FeaturePlot_scCustom(seu, features = c("adt_CD8"))
+seu8<-subset(seu, subset = rna_Cd4 <= 0 & rna_Cd8a > 0 & adt_CD8 > 1.5)
+```
+
+```{r re-embed}
+DefaultAssay(seu8)<-"RNA"
+seu8$percent.tcr <- PercentageFeatureSet(seu8, pattern = "^Trbv")
+FeaturePlot_scCustom(seu8, features = "percent.tcr")
+
+seu <- SCTransform(seu8, vars.to.regress = "percent.tcr", verbose = FALSE)
+seu<-FindVariableFeatures(seu)
+
+rownames(seu)[grep("Tr", rownames(seu))]
+
+#CAR-T cell expressing TCR genes cause non-cell type driven embedding, so I'm removing them from Variable Features :)
+VariableFeatures(seu)<-VariableFeatures(seu)[!grepl("Trav|Trbv|Trdv", VariableFeatures(seu))]
+# These are now standard steps in the Seurat workflow for visualization and clustering
+seu <- RunPCA(seu, verbose = FALSE)
+ElbowPlot(seu)
+seu <- RunUMAP(seu, dims = 1:30, verbose = FALSE)
+seu <- FindNeighbors(seu, dims = 1:30, verbose = FALSE)
+seu <- FindClusters(seu, verbose = T, graph.name = "SCT_snn", resolution =0.2)
+DimPlot(seu, label = TRUE, group.by = "seurat_clusters") + NoLegend()
+
+FeaturePlot(seu, features = "percent.mt")
+
+#remove poor quality cluster
+seu<-seu[,which(seu$seurat_clusters != "5")]
+
+seu <- RunUMAP(seu, dims = 1:17, verbose = FALSE)
+seu <- FindNeighbors(seu, dims = 1:17, verbose = FALSE)
+seu <- FindClusters(seu, verbose = T, graph.name = "SCT_snn", resolution =0.3)
+DimPlot(seu, label = TRUE, group.by = "seurat_clusters") + NoLegend()
+
+#Lyz2 is a myeloid marker
+FeaturePlot_scCustom(seu, c("Itgam", "Lyz2"))
+
+#remove poor quality cluster
+seu<-seu[,which(seu$seurat_clusters != "6")]
+
+seu <- RunUMAP(seu, dims = 1:17, verbose = FALSE)
+seu <- FindNeighbors(seu, dims = 1:17, verbose = FALSE)
+seu <- FindClusters(seu, verbose = T, graph.name = "SCT_snn", resolution =0.3)
+DimPlot(seu, label = TRUE, group.by = "seurat_clusters") + NoLegend()
+
+FeaturePlot_scCustom(seu, features = c(  "Sell", "Tcf7", "Ly6a", "Havcr2", "Slamf6", "Maf","Jun", "Mki67",  "Prf1", "Gzmb", "Ifng", "Tox"), colors_use = rna_cols, max.cutoff="q99")
+```
+
+# Add TCR data
+```{r}
+bcs<-colnames(seu)
+
+#all barcodes end in -1, the only identifier is the prefix
+str_split(bcs, "\\-")%>% sapply("[[", 2) %>% table()
+
+x<-"SM_4"
+tcr<-read.csv(file.path(DATA_DIR, x, "outs/per_sample_outs", x, "vdj_t/filtered_contig_annotations.csv"))
+
+#check barcode prefixes
+tcr$barcode
+bcs
+
+tcr<-combineTCR(list(tcr), samples = "SM_4", cells ="T-AB")
+tcr[[1]]$barcode<-gsub("SM_4_", "",tcr[[1]]$barcode )
+
+#make sure the barcodes match!
+tcr[[1]]$barcode %in% colnames(seu) %>% table()
+
+#add to seurat objects
+seu <- combineExpression(tcr, seu, 
+                  cloneCall="aa", 
+                  proportion = FALSE, 
+                  cloneTypes=c(Single=1, Small=2, Medium=10, Large=125))
+
+table(seu$cloneType)
+1811/6848
+
+ggplot(seu@meta.data, aes(x = Frequency))+geom_histogram(binwidth = 2)
+#write.csv(do.call(rbind, combined), file.path(RES_DIR, "clonotype_df.csv"))
+```
+
+# Doheatmap on top markers seu
+```{r seurat clusters}
+DefaultAssay(seu)<-"SCT"
+Idents(seu)<-"seurat_clusters"
+seu_markers<-FindAllMarkers(seu, only.pos = F) 
+write.csv(seu_markers, file.path(RES_DIR, "seu_markers.csv"))
+library("stringr") 
+top_n<- seu_markers %>%
+group_by(cluster) %>%
+slice_max(n = 10, order_by = avg_log2FC ) 
+
+pdf(file.path(FIG_DIR, "clusters_heatmap.pdf"), width = 7, height =7)
+DoHeatmap(seu, features = top_n$gene, assay = "SCT", slot = "scale.data",group.by = "seurat_clusters", group.colors =clus_cols, raster = F)+scale_fill_gradientn(colours =rna_cols)
+dev.off()
+```
+
+# assign cell types
+```{r}
+seu$cell_type<-as.character(seu$seurat_clusters)
+seu$cell_type[seu$seurat_clusters == 0]<-"NK-like CAR-T cells"
+seu$cell_type[seu$seurat_clusters == 1]<-"Tpex"
+seu$cell_type[seu$seurat_clusters == 2]<-"Tfex"
+seu$cell_type[seu$seurat_clusters == 3]<-"Tex"
+seu$cell_type[seu$seurat_clusters == 4]<-"Cycling Tex"
+seu$cell_type[seu$seurat_clusters == 5]<-"IFN responsive Tex"
+```
+
+# Save object
+```{r}
+saveRDS(seu, file.path(CDS_DIR, "cart_sm_seurat.rds"))
+```
+
+# Fig 6E
+```{r}
+Idents(seu)<- "cell_type"
+pdf(file.path(FIG_DIR, "cell_type_umap.pdf"), width = 5.5, height =4)
+DimPlot(seu, pt.size = 0.6, order = T)+scale_color_manual(values = clus_cols)+NoAxes()
+dev.off()
+```
+
+# Fig 6F
+```{r}
+DotPlot_scCustom(seu, features = c("Sell", "Lef1", "Tcf7", "Tbx21", "Mki67", "Il10", "Il7r","Tox", "Bach2","Slamf6","Cx3cr1", "Havcr2","Gzma", "Batf", "Pdcd1"), colors_use= paletteContinuous(n=8)[c(1:3, 6:8)])+RotatedAxis()+ggtitle(label="CD8")
+```
+
+# TCR analysis
+```{r}
+Idents(seu)<-"cell_type"
+
+ggplot(seu@meta.data, aes(x = Frequency))+geom_histogram()
+
+slot(seu, "meta.data")$cloneType <- factor(slot(seu, "meta.data")$cloneType, 
+                levels = c("Large (10 < X <= 125)", 
+                            "Medium (2 < X <= 10)", 
+                            "Small (1 < X <= 2)", 
+                            "Single (0 < X <= 1)", "None"))
+seu$cloneType[is.na(seu$cloneType)]<-"None"
+seu$cloneType<-factor(seu$cloneType, levels = c("None", "Single (0 < X <= 1)", "Small (1 < X <= 2)","Medium (2 < X <= 10)", "Large (10 < X <= 125)"))
+```
+
+#Fig 6G
+```{r}
+circles <- getCirclize(seu, 
+                       group.by = "cell_type")
+
+#Graphing the chord diagram
+chordDiagram(circles, self.link = 1, grid.col = clus_cols)
+```
+
+

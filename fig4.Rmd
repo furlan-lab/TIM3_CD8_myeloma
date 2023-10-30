@@ -1,0 +1,135 @@
+---
+title: "Relasped mulitome"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r, warning=FALSE, message=FALSE, warning=FALSE, echo=F}
+graphics.off()
+rm(list=ls())
+knitr::opts_chunk$set(fig.width=8, fig.height=6,dpi=300,
+                      echo=FALSE, warning=FALSE, message=FALSE)
+setwd("/fh/fast/furlan_s/user/owalt/exhaustion/relapse")
+RES_DIR  <- file.path("res")     # SPECIFY HERE
+RMD_DIR  <- file.path("rmd")     # SPECIFY HERE
+FIG_DIR <- file.path("figs")
+
+suppressPackageStartupMessages({
+  library(monocle3)
+  library(m3addon)
+  library(reticulate)
+  library(viridis)
+  library(openxlsx)  
+  library(dplyr)
+  library(Matrix)
+  library(ggplot2)
+  library(xfun)
+  library(pals)
+  library(RColorBrewer)
+  library(Signac)
+  library(Seurat)
+  library(ggplot2)
+  library(future)
+  library(GenomicRanges)
+  library(EnsDb.Mmusculus.v79)
+  library(ComplexHeatmap)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+  #library(JASPAR2020)
+  library(TFBSTools)
+  library(patchwork)
+  library(stringr)
+  library(ggrepel)
+  library(ggsignif)
+  library(ggpubr)
+  library(ArchR)
+  library(harmony)
+  library(viridis)
+  library(scCustomize)
+  library(SeuratDisk)
+  library(BuenColors)
+  library(pbmcapply)
+  library(ggrastr)
+  library(msigdbr)
+  library(FigR)
+  library(parallel)
+})
+
+set.seed(1234)
+rel<- loadArchRProject("/fh/fast/furlan_s/user/owalt/exhaustion/relapse")
+seu<-readRDS(file = "/fh/fast/furlan_s/user/owalt/exhaustion/relapse/relapse_seurat.rds")
+```
+
+configure python environment
+```{r}
+library(reticulate)
+# /home/owaltner/mypython/bin/python
+
+Sys.setenv(RETICULATE_PYTHON="/home/owaltner/mypython/bin/python")
+use_virtualenv("/home/owaltner/mypython")
+use_python("/home/owaltner/mypython/bin/python")
+py_config()
+
+
+Sys.setenv(PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION="python")
+```
+
+configure R environment
+```{r, warning=FALSE, message=FALSE, warning=FALSE, echo=F}
+dyn.load('/app/software/ArrayFire/3.8.1/lib64/libaf.so.3')
+library(RcppArrayFire)
+library(viewmaster)
+
+Sys.setenv(MODULEPATH="/app/modules/all", MODULEPATH_ROOT="/app/modules/all", MODULESHOME="/app/lmod/lmod")
+source("/app/lmod/lmod/init/R", echo=FALSE, max=Inf)
+module("load", "MACS2/2.2.6-foss-2019b-Python-3.7.4")
+module("load", "GCCcore/11.2.0")
+
+#make cairo functional
+knitr::opts_chunk$set(dev="CairoPNG")
+
+detach("package:ArchR", unload=TRUE)
+library(ArchR)
+
+```
+
+```{r colors}
+rna_cols <- paletteContinuous(n=8)[c(1:3, 6:8)]
+atac_cols <- paletteContinuous(set = "blueYellow")
+
+pal<- rev(mako(n=9))
+pal<-pal[1:8]
+pal<-c("#ffffff", pal)
+chromvar_cols<-pal
+
+adt_cols <- paletteContinuous(set = "whiteBlue")
+pseudotime_cols<- viridis::plasma(n=10)
+tcr_cols <- c("gray90", rev(brewer.spectral(n =5)))
+
+t <-BuenColors::jdb_palette("brewer_spectra")
+multiome_cols <- c(t[2],t[3], "#e5e6e1", t[7],t[9])
+
+h_cols <-rev(brewer.pal(name = "RdYlBu", n = 7))
+rna_cols<-paletteContinuous(n=10)[c(1:4, 7:10)]
+seu$cell_type%>% table()
+
+seu$cell_type<-factor(seu$cell_type, levels = c("Tn", "Tcm", "Tem", "Tem_2", "Teff", "Tpex", "Tg_phex", "Tex", "Tex_cycling", "Ly6a-_Tex", "Ifng-_Tex"))
+
+cell_type_cols<-c( "Ifng-_Tex" ="#191970","Ly6a-_Tex" = "#006400", "Tex" = "#87CEFA", "Tg_phex" = "#20B2AA","Tcm" = "#696969", "Teff" = "#9370DB", "Tem" = "#FF8C00", "Tem_2" = "#FF4500", "Tex_cycling" = "#1E90FF", "Tn" = "#ebeb78", "Tpex" ="#DC143C" )
+
+cluster_cols<-c("0" = "#20B2AA","1" = "#006400", "8" = "#87CEFA", "10" ="#191970", "5" = "#696969", "2" = "#9370DB", "4" = "#FF8C00", "9" = "#FF4500", "6" = "#1E90FF", "3" = "#ebeb78", "7" ="#DC143C" )
+```
+
+#GSEA
+```{r}
+m_df<-msigdbr(species = "Mus musculus", category = "H")
+oxphos<-m_df[m_df$gs_name == "HALLMARK_OXIDATIVE_PHOSPHORYLATION",]$gene_symbol
+glyco<-m_df[m_df$gs_name == "HALLMARK_GLYCOLYSIS",]$gene_symbol
+
+seu<-AddModuleScore(seu, features = list(oxphos), name = "oxphos")
+seu<-AddModuleScore(seu, features = list(glyco), name = "glyco")
+
+VlnPlot(seu, features = c("glyco1", "oxphos1"), group.by = "cell_type", cols = cell_type_cols, pt.size = 0)
+FeaturePlot_scCustom(seu, features = c("glyco1", "oxphos1"), colors_use = rna_cols, max.cutoff = "q99", pt.size = 0.7, order =T )&NoAxes()
+```

@@ -1,0 +1,166 @@
+---
+title: "Human pancancer"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r}
+rm(list=ls())
+setwd("/fh/fast/furlan_s/user/owalt/exhaustion/human")
+RES_DIR  <- file.path("res")     # SPECIFY HERE
+RMD_DIR  <- file.path("rmd")     # SPECIFY HERE
+FIG_DIR <- file.path("figs")
+
+suppressPackageStartupMessages({
+  library(monocle3)
+  library(m3addon)
+  library(reticulate)
+  library(viridis)
+  library(openxlsx)  
+  library(dplyr)
+  library(Matrix)
+  library(ggplot2)
+  library(xfun)
+  library(pals)
+  library(RColorBrewer)
+  library(Signac)
+  library(Seurat)
+  library(ggplot2)
+  library(future)
+  library(GenomicRanges)
+  library(EnsDb.Mmusculus.v79)
+  library(ComplexHeatmap)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+  library(JASPAR2020)
+  library(TFBSTools)
+  library(patchwork)
+  library(stringr)
+  library(ggrepel)
+  library(ggsignif)
+  library(ggpubr)
+  library(ArchR)
+  library(harmony)
+  library(viridis)
+  library(scCustomize)
+  library(SeuratDisk)
+  library(parallel)
+  library(pbmcapply)
+})
+
+set.seed(1234)
+
+dyn.load('/app/software/ArrayFire/3.8.1/lib64/libaf.so.3')
+library(RcppArrayFire)
+library(viewmastR)
+library(viewmaster)
+
+hmm<-readRDS("human_cd8_myeloma.rds")
+hcan<-readRDS("human_cd8_pancancer.rds")
+```
+
+#colors
+```{r}
+rna_cols <- paletteContinuous(n=8)[c(1:3, 6:8)]
+mm2$cluster1<-factor(mm2$cluster1, levels=c("Tn", "Tcm", "Tem", "Tpex", "Teff", "Tex_1", "Maf+_Tex", "Gzma+_Tex", "Tex_cycling"))
+fish_cols<-c("Gzma+_Tex" ="#16482A","Maf+_Tex" = "#45AC49","Tcm" = "#50191E", "Teff"= "#bc2cdb","Tem" = "#f0821d" ,"Tex_1"= "#3244a8","Tex_cycling"="#2394C4","Tn"="#ffc400","Tpex"="#DC3F32" )
+```
+
+# Fig 7F
+```{r}
+meta_cols<-paletteDiscrete(values = levels(factor(hmm$meta.cluster)))
+
+DimPlot(hmm, group.by = "meta.cluster", cols =meta_cols, pt.size = 0.7)&NoAxes()
+DimPlot(hmm, group.by = "loc", pt.size =0.7, cols = paletteDiscrete(set = "circus",values = levels(factor(hmm$loc))))&NoAxes()
+
+FeaturePlot_scCustom(hmm, features = c("TOX", "GZMA","GZMB", "PRF1", "IFNG", "LEF1", "TCF7", "MKI67","HAVCR2", "CD28", "PDCD1", "CX3CR1", "BATF", "ATXN1", "IL10", "SLAMF6"), colors_use = rna_cols,pt.size =0.7, max.cutoff = "q99")&NoAxes()
+
+```
+  
+# Fig S13A
+```{r}
+hmm<-FindNeighbors(hmm)
+hmm<-FindClusters(hmm, resolution = 0.2)
+DimPlot(hmm, group.by = "seurat_clusters", pt.size =0.7, cols = paletteDiscrete(set = "circus",values = levels(factor(hmm$seurat_clusters))))&NoAxes()
+
+markers<-FindAllMarkers(hmm, only.pos = T)
+
+markers$p_val_adj[markers$p_val_adj == 0]<-1e-300
+
+hum_tgphex<-markers[markers$cluster == 5,] %>% dplyr::filter(-log10(p_val_adj) >5 & avg_log2FC > 0.2)%>% dplyr::select(gene) %>% dplyr::filter(!grepl("^RP", gene)) %>% dplyr::filter(!grepl("^MT", gene))
+
+write.csv(hum_tgphex$gene, file.path("../human/res/tgphex_markers_human.csv"))
+
+hmm<-AddModuleScore(hmm, features = list(hum_tgphex$gene), name = "tgphex")
+FeaturePlot_scCustom(hmm, features = "tgphex1", colors_use = rna_cols, max.cutoff = "q99", pt.size = 0.6, order =T)+ggtitle("Human BATF expressing signature")&NoAxes()
+```
+
+#Fig S13B
+```{r}
+mm2<- readRDS(file.path("/fh/fast/furlan_s/user/owalt/exhaustion/mm2/cds/120621_mm2_seurat.rds"))
+tgphex_markers<-read.csv("../mm2/res/tgphex_markers.csv") 
+
+mm2<-AddModuleScore(mm2, features = list(tgphex_markers$gene), name = "tgphex")
+
+FeaturePlot_scCustom(mm2, features = "tgphex1", colors_use = rna_cols, pt.size = 0.6, order =T)+ggtitle("mm tgphex signature")&NoAxes()
+```
+
+Fig S13C
+```{r find convserved geneset}
+conserved_tphex_genes<-intersect(tgphex_markers$gene, hum_tgphex$gene %>% str_to_title())
+
+write.csv(conserved_tphex_genes, file.path("../human/res/conserved_tphex_genes.csv"))
+
+ggvenn(
+  list("mouse"=tgphex_markers$gene, "human"=hum_tgphex$gene %>% str_to_title()), 
+  fill_color = c("#0073C2FF", "#EFC000FF", "#868686FF", "#CD534CFF"),
+  stroke_size = 0.5, set_name_size = 4
+  )
+```
+
+Fig 7G
+```{r find convserved geneset}
+hmm<-AddModuleScore(hmm, features = list(conserved_tphex_genes %>% toupper()), name = "tgphex")
+FeaturePlot_scCustom(hmm, features = "tgphex1", colors_use = rna_cols, max.cutoff = "q99",  pt.size = 0.6, order =T)+ggtitle("conserved tgphex signature")&NoAxes()
+```
+
+Fig S13D
+```{r find convserved geneset}
+mm2<-AddModuleScore(mm2, features = list(conserved_tphex_genes), name = "tgphex")
+FeaturePlot_scCustom(mm2, features = "tgphex1", colors_use = rna_cols, max.cutoff = "q99",  pt.size = 0.6, order =T)+ggtitle("conserved tgphex signature")&NoAxes()
+```
+
+Fig 7H
+```{r}
+meta_cols<-viewmaster::pal_discrete(values = levels(factor(hcan$meta.cluster.coarse)), set = "fallDay", reverse = T)
+
+pdf("figs/zheng2021_umap.pdf", width =8, height = 5)
+DimPlot(hcan, group.by = "meta.cluster.coarse", cols =meta_cols, pt.size = 1, label = T, label.size = 2)&NoAxes()
+dev.off()
+
+sig<-read.csv(file.path("../human/res/conserved_tphex_genes.csv"))
+sig$x
+
+hcan<-AddModuleScore(hcan, features = list(sig$x %>% toupper()), name = "convserved_sig")
+
+pdf("figs/zheng2021_conserved_sig_umap.pdf", width = 7, height = 5)
+FeaturePlot_scCustom(hcan, features = "convserved_sig1", colors_use = rna_cols)&NoAxes()
+dev.off()
+```
+
+Fig 7I
+```{r}
+pdf("figs/zheng2021_conserved_sig_celltype_cxcl3_cluster.pdf", width = 7, height = 5)
+ggplot(hcan@meta.data[grep("CXCL13",hcan$meta.cluster.coarse),], aes(x = cancerType, y = convserved_sig1, fill = cancerType))+geom_violin()+theme_classic()+RotatedAxis()+scale_fill_manual(values = brewer.accent(n=10))
+dev.off()
+```
+
+Fig S13E
+```{r}
+pdf("figs/zheng2021_conserved_sig_celltype_cluster.pdf", width =5, height = 13)
+ggplot(hcan@meta.data, aes(x = meta.cluster.coarse, y = convserved_sig1, fill = meta.cluster.coarse))+geom_violin()+theme_classic()+RotatedAxis()+scale_fill_manual(values = meta_cols)+facet_wrap(~cancerType)
+dev.off()
+```
+
+

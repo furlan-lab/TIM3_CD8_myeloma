@@ -1,0 +1,115 @@
+---
+title: "Human pancancer"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r}
+rm(list=ls())
+setwd("/fh/fast/furlan_s/user/owalt/exhaustion/human")
+RES_DIR  <- file.path("res")     # SPECIFY HERE
+RMD_DIR  <- file.path("rmd")     # SPECIFY HERE
+FIG_DIR <- file.path("figs")
+
+suppressPackageStartupMessages({
+  library(monocle3)
+  library(m3addon)
+  library(reticulate)
+  library(viridis)
+  library(openxlsx)  
+  library(dplyr)
+  library(Matrix)
+  library(ggplot2)
+  library(xfun)
+  library(pals)
+  library(RColorBrewer)
+  library(Signac)
+  library(Seurat)
+  library(ggplot2)
+  library(future)
+  library(GenomicRanges)
+  library(EnsDb.Mmusculus.v79)
+  library(ComplexHeatmap)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+  library(JASPAR2020)
+  library(TFBSTools)
+  library(patchwork)
+  library(stringr)
+  library(ggrepel)
+  library(ggsignif)
+  library(ggpubr)
+  library(ArchR)
+  library(harmony)
+  library(viridis)
+  library(scCustomize)
+  library(SeuratDisk)
+  library(parallel)
+  library(pbmcapply)
+})
+
+set.seed(1234)
+
+dyn.load('/app/software/ArrayFire/3.8.1/lib64/libaf.so.3')
+library(RcppArrayFire)
+library(viewmastR)
+library(viewmaster)
+```
+
+#colors
+```{r}
+rna_cols <- paletteContinuous(n=8)[c(1:3, 6:8)]
+mm2$cluster1<-factor(mm2$cluster1, levels=c("Tn", "Tcm", "Tem", "Tpex", "Teff", "Tex_1", "Maf+_Tex", "Gzma+_Tex", "Tex_cycling"))
+fish_cols<-c("Gzma+_Tex" ="#16482A","Maf+_Tex" = "#45AC49","Tcm" = "#50191E", "Teff"= "#bc2cdb","Tem" = "#f0821d" ,"Tex_1"= "#3244a8","Tex_cycling"="#2394C4","Tn"="#ffc400","Tpex"="#DC3F32" )
+```
+
+#Make MM object
+```{r}
+rna<-read.table("data/GSE156728_MM_10X.CD8.counts.txt", header = T)
+mat<-rna[,-1]
+rownames(mat)<-rna[,1]
+
+meta<-read.table("data/GSE156728_metadata.txt", header = T)
+head(meta)
+meta<-meta[meta$cellID %in% colnames(mat),]
+rownames(meta)<-meta$cellID
+
+hum<-CreateSeuratObject(counts = mat %>% as.sparse(), meta.data = meta)
+
+hum<-NormalizeData(hum) %>% FindVariableFeatures() %>% ScaleData() %>% RunPCA()
+tex<-NormalizeData(hum[,grep("Tex", hum$meta.cluster)]) %>% FindVariableFeatures() %>% ScaleData() %>% RunPCA()
+ElbowPlot(hum)
+
+hum<-RunHarmony(hum, group.by.vars = "loc")
+hum<-RunUMAP(hum, dims = 1:15, reduction = "harmony")
+
+meta_cols<-paletteDiscrete(values = levels(factor(hum$meta.cluster)))
+
+DimPlot(hum, group.by = "meta.cluster", cols =meta_cols, pt.size = 0.7)&NoAxes()
+
+tex_cols<-rep("gray80",length(levels(factor(hum$meta.cluster))))
+names(tex_cols)<-levels(factor(hum$meta.cluster))
+tex_cols[grep("Tex", names(tex_cols))]<-meta_cols[grep("Tex",names(meta_cols))]
+
+DimPlot(hum, group.by = "meta.cluster", cols = tex_cols, pt.size = 0.7 )&NoAxes()
+DimPlot(hum, group.by = "loc", pt.size =0.7, cols = paletteDiscrete(set = "circus",values = levels(factor(hum$loc))))&NoAxes()
+
+saveRDS(hum,"human_cd8_myeloma.rds")
+```
+
+#make cd8 pancancer object
+```{r}
+seu<-readRDS("../extdata/human/all_cancer/data/expression/CD8/integration/CD8.thisStudy_10X.seu.rds")
+seu<-UpdateSeuratObject(seu)
+seu<-NormalizeData(seu) %>% FindVariableFeatures() %>% ScaleData() %>% RunPCA()
+
+ElbowPlot(seu)
+
+names(seu@meta.data)
+
+seu<-RunHarmony(seu, group.by.vars = "patient")
+seu<-RunUMAP(seu, dims = 1:15, reduction = "harmony")
+
+saveRDS(hum,"human_cd8_pancancer.rds")
+```

@@ -1,0 +1,111 @@
+---
+title: "cdsi Load"
+author: OW_SSB
+output: html_myeebook
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r, warning=FALSE, message=FALSE, warning=FALSE, echo=F}
+rm(list=ls())
+ROOT_DIR<-"/fh/fast/furlan_s/user/owalt/exhaustion/cart_sm"
+setwd(ROOT_DIR)
+DATA_DIR <- file.path(ROOT_DIR, "data")      # SPECIFY HERE
+RES_DIR  <- file.path(ROOT_DIR,  "res")     # SPECIFY HERE
+RMD_DIR  <- file.path(ROOT_DIR,  "rmd")     # SPECIFY HERE
+CDS_DIR <- file.path(ROOT_DIR,   "cds")
+FIG_DIR <- file.path(ROOT_DIR,  "figs")
+
+suppressPackageStartupMessages({
+  library(monocle3)
+  library(m3addon)
+  library(dplyr)
+  library(Matrix)
+  library(reticulate)
+  library(ggplot2)
+  library(pals)
+  library(RColorBrewer)
+  library(Seurat)
+  library(ComplexHeatmap)
+  library(ArchR)
+  library(Biobase)
+  library(stringr)
+  library(viridis)
+  library(Seurat)
+  library(parallel)
+  library(scCustomize)
+  library(scRepertoire)
+  library(evmix)
+  library(forcats)
+  library(ggalluvial)
+  library(future)
+  library(pbmcapply)
+  library(parallel)
+  library(dplyr)
+  library(msigdbr)
+  library(fgsea)
+  library(stringr)
+  library(harmony)
+  library(future)
+  library(ggplot2)
+  library(circlize)
+  library(scales)
+})
+
+set.seed(1234)
+
+dyn.load('/app/software/ArrayFire/3.8.1/lib64/libaf.so.3')
+library(RcppArrayFire)
+library(viewmaster)
+```
+
+# Load object
+```{r}
+seu<-readRDS(file.path(CDS_DIR, "cart_sm_seurat.rds"))
+```
+
+# load colors
+```{r, load colors and object}
+seu$cell_type<-factor(seu$cell_type, levels = c("Tpex", "IFN responsive Tex","NK-like CAR-T cells","Tex",  "Tfex", "Cycling Tex" ))
+clus_cols<-c("NK-like CAR-T cells" = "#710162","IFN responsive Tex" = "#fbbf45", "Tfex" = "#03c383","Cycling Tex" = "#3B9AB2","Tpex" = "#ed0345","Tex" = "#017351" )
+rna_cols<-paletteContinuous(n=8)[c(1:3, 6:8)]
+```
+
+# Fig 6E
+```{r}
+Idents(seu)<- "cell_type"
+pdf(file.path(FIG_DIR, "cell_type_umap.pdf"), width = 5.5, height =4)
+DimPlot(seu, pt.size = 0.6, order = T)+scale_color_manual(values = clus_cols)+NoAxes()
+dev.off()
+```
+
+# Fig 6F
+```{r}
+DotPlot_scCustom(seu, features = c("Sell", "Lef1", "Tcf7", "Tbx21", "Mki67", "Il10", "Il7r","Tox", "Bach2","Slamf6","Cx3cr1", "Havcr2","Gzma", "Batf", "Pdcd1"), colors_use= paletteContinuous(n=8)[c(1:3, 6:8)])+RotatedAxis()+ggtitle(label="CD8")
+```
+
+# TCR analysis
+```{r}
+Idents(seu)<-"cell_type"
+
+ggplot(seu@meta.data, aes(x = Frequency))+geom_histogram()
+
+slot(seu, "meta.data")$cloneType <- factor(slot(seu, "meta.data")$cloneType, 
+                levels = c("Large (10 < X <= 125)", 
+                            "Medium (2 < X <= 10)", 
+                            "Small (1 < X <= 2)", 
+                            "Single (0 < X <= 1)", "None"))
+seu$cloneType[is.na(seu$cloneType)]<-"None"
+seu$cloneType<-factor(seu$cloneType, levels = c("None", "Single (0 < X <= 1)", "Small (1 < X <= 2)","Medium (2 < X <= 10)", "Large (10 < X <= 125)"))
+```
+
+#Fig 6G
+```{r}
+circles <- getCirclize(seu, 
+                       group.by = "cell_type")
+
+#Graphing the chord diagram
+chordDiagram(circles, self.link = 1, grid.col = clus_cols)
+```
+
+
